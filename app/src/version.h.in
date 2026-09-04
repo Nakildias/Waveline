@@ -1,0 +1,3 @@
+#pragma once
+
+#define WAVELINE_VERSION "@WAVELINE_VERSION_STRING@"

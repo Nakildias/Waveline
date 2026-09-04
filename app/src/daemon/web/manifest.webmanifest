@@ -1,0 +1,15 @@
+{
+  "name": "Waveline Companion",
+  "short_name": "Waveline",
+  "description": "Control the Waveline mixer from a phone or tablet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#121214",
+  "theme_color": "#121214",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/app-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" }
+  ]
+}

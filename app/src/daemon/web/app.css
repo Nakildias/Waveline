@@ -1,0 +1,1059 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+ *
+ * The companion page's stylesheet.
+ *
+ * Tailwind's utility vocabulary, hand-built rather than generated. The page is
+ * compiled into wavelined and served by it, which rules out a CDN -- the whole
+ * point of this feature is a tablet on a LAN, frequently one with no route to
+ * the internet, and a stylesheet that only arrives when the internet does is
+ * not a stylesheet. A build step was the other option and would mean npm and a
+ * generated artefact in a tree that currently builds with nothing but cmake.
+ *
+ * So: the utilities below are Tailwind's, spelled the same and behaving the
+ * same, and this file contains exactly the ones the page uses. Anything genuinely
+ * custom -- the faders, the meters, the switches -- is a component class, because
+ * those are painted rather than composed and utilities would only obscure them.
+ *
+ * The palette is the desktop mixer's (src/ui/theme.h), so a phone propped beside
+ * the monitor does not read as a different application.
+ */
+
+:root {
+    --bg: #121214;
+    --well: #0c0c0e;
+    --card: #1e1e22;
+    --card-hover: #26262b;
+    --line: #2e2e34;
+    --fg: #e8e8ec;
+    --dim: #9a9aa4;
+    --faint: #666670;
+    --accent: #3dd68c;
+    --accent-dim: #247f54;
+    --warn: #ffb32e;
+    --danger: #e84b4b;
+    --fader: #b4b4be;
+    /* Theme::Violet, which is the desktop's microphone meter. */
+    --violet: #a96df5;
+    /* Set per card by the script, so a strip's own colour reaches its meter,
+     * its fader fill and its icon tile without three separate assignments. */
+    --tint: #6a6a76;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/*
+ * The document itself never scrolls and never bounces.
+ *
+ * overscroll-behavior alone is not enough on iOS: Safari rubber-bands the
+ * *document* whatever the property says, and this page has three inner
+ * scrollers (the mixer row, the output rows, the settings sheet) that all
+ * reach their end regularly -- so a drag that carried on past one of them
+ * peeled the whole mixer off the top of the screen and slid it back. A fixed
+ * body has no scrollport of its own to bounce, which is the only reliable
+ * answer there; the inner scrollers then use `contain` so hitting the end of
+ * one stops there instead of handing the gesture up.
+ */
+html {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+body {
+    margin: 0;
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+                 Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+    /* A mixer is not a document. Text selection on a control surface only ever
+     * happens by accident, mid-drag, and leaves a blue smear over the fader. */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+button { font: inherit; color: inherit; }
+
+/* ------------------------------------------------------------- utilities */
+
+.flex { display: flex; }
+.hidden, [hidden] { display: none !important; }
+.flex-col { flex-direction: column; }
+.flex-1 { flex: 1 1 0%; }
+.flex-none { flex: none; }
+.items-center { align-items: center; }
+.items-stretch { align-items: stretch; }
+.justify-between { justify-content: space-between; }
+.justify-end { justify-content: flex-end; }
+
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+
+.w-full { width: 100%; }
+.h-full { height: 100%; }
+.min-w-0 { min-width: 0; }
+.min-h-0 { min-height: 0; }
+.mb-1 { margin-bottom: 4px; }
+.mb-2 { margin-bottom: 8px; }
+
+.px-2 { padding-left: 8px; padding-right: 8px; }
+.px-4 { padding-left: 16px; padding-right: 16px; }
+.py-3 { padding-top: 12px; padding-bottom: 12px; }
+
+/* Every inner scroller contains its own overscroll: reaching the end of one is
+ * the end of the gesture, not the start of the next scroller's. */
+.overflow-y-auto { overflow-y: auto; overscroll-behavior: contain; }
+
+.text-right { text-align: right; }
+.text-\[10px\] { font-size: 10px; }
+.text-xs { font-size: 12px; }
+.text-sm { font-size: 13px; }
+.text-lg { font-size: 17px; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.tracking-wide { letter-spacing: 0.04em; }
+.tabular-nums { font-variant-numeric: tabular-nums; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.text-dim { color: var(--dim); }
+.text-faint { color: var(--faint); }
+.text-accent { color: var(--accent); }
+
+/* ------------------------------------------------------------- components */
+
+.wordmark {
+    font-weight: 700;
+    font-size: 19px;
+    letter-spacing: 0.14em;
+    line-height: 1.05;
+}
+
+.header {
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding-top: env(safe-area-inset-top);
+    flex: none;
+    /* Anchors the collapse tab, and keeps it and the band above the mixer it
+     * now overlaps. */
+    position: relative;
+    z-index: 1;
+}
+/* Once folded there is no band left for the tab's inner half to sit against,
+ * and on a phone with no notch that half would be off the top of the screen.
+ * A sliver of padding is enough to land it, and it animates with the fold. */
+.header, .footer { transition: padding 240ms cubic-bezier(0.4, 0, 0.2, 1); }
+.header.is-collapsed { padding-bottom: 10px; }
+.footer.is-collapsed { padding-top: 10px; }
+
+/* ---- collapsible bands ------------------------------------------------ */
+/*
+ * A 1fr..0fr grid row rather than a max-height. Height is what actually has to
+ * animate, and the content's height is not known here -- a max-height large
+ * enough to hold two monitor outputs makes the transition on a card with one
+ * of them run mostly through empty space, which reads as a lag before anything
+ * moves. The grid track interpolates against the real measured height, so both
+ * ends of the animation are the content's own.
+ */
+.collapsible {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 240ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.collapsible > .collapsible-inner {
+    min-height: 0;
+    overflow: hidden;
+}
+.is-collapsed > .collapsible { grid-template-rows: 0fr; }
+/* Set for two frames while a remembered state is applied on load. */
+.no-transition,
+.no-transition .collapsible,
+.no-transition .collapsible > .collapsible-inner,
+.no-transition .edge-toggle svg { transition: none; }
+
+/* Reduce Motion, from the device settings. Only the fold: meters and faders
+ * are not decoration, they are the readout, and a meter that snapped between
+ * values instead of moving would be harder to read rather than cheaper. */
+.no-motion .header,
+.no-motion .footer,
+.no-motion .collapsible,
+.no-motion .collapsible > .collapsible-inner,
+.no-motion .edge-toggle svg { transition: none; }
+/* Fades slightly ahead of the fold, so the band is already gone visually by the
+ * time the last few pixels close. */
+.collapsible > .collapsible-inner {
+    opacity: 1;
+    transition: opacity 180ms ease 60ms;
+}
+.is-collapsed > .collapsible > .collapsible-inner {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+/*
+ * The tab itself, straddling the edge of the band it folds. Absolutely
+ * positioned in a zero-height strip so it costs the layout nothing in either
+ * state -- a row of its own would have taken height from the mixer permanently
+ * to save height occasionally, which is backwards.
+ */
+.edge-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 0;
+    display: flex;
+    align-items: center;      /* centres the pill *on* the edge line */
+    justify-content: center;
+    z-index: 1;
+}
+.header .edge-bar { bottom: 0; }
+.footer .edge-bar { top: 0; }
+
+.edge-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    /* Small, because it now floats over the mixer and everything it covers is
+     * something somebody might want to touch. */
+    height: 18px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 9999px;
+    /* Lighter than either surface it overlaps -- the band on one side, the
+     * page behind the well on the other -- so it reads as a tab on the seam
+     * rather than as part of whichever it happens to be over. */
+    background: var(--card-hover);
+    color: var(--faint);
+    cursor: pointer;
+}
+.edge-toggle:active { background: var(--line); }
+.edge-toggle svg {
+    width: 16px;
+    height: 16px;
+    transition: transform 240ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Pointing at where the band goes: up while it is open and about to fold away,
+ * down once it is folded and the tap would bring it back. Mirrored in the
+ * footer, which folds the other way. */
+.header .edge-toggle svg { transform: rotate(180deg); }
+.header.is-collapsed .edge-toggle svg { transform: rotate(0deg); }
+.footer .edge-toggle svg { transform: rotate(0deg); }
+.footer.is-collapsed .edge-toggle svg { transform: rotate(180deg); }
+
+/* Connection light. Amber while reconnecting rather than red: a socket that
+ * dropped a second ago and is coming back is not the same state as a daemon
+ * that is not there, and treating them alike trains people to ignore it. */
+.dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 9999px;
+    background: var(--faint);
+    flex: none;
+    transition: background 160ms;
+}
+.dot.is-up { background: var(--accent); box-shadow: 0 0 0 3px rgba(61, 214, 140, 0.18); }
+.dot.is-wait { background: var(--warn); }
+.dot.is-down { background: var(--danger); }
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--card-hover);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    /* Below Apple's 44px only where the label makes the target obvious anyway;
+     * everything that is icon-only sets its own minimum. */
+    min-height: 40px;
+}
+.btn:active { background: var(--line); }
+.btn.is-on { background: var(--accent-dim); border-color: var(--accent); }
+.btn-icon { min-width: 40px; justify-content: center; padding: 9px; }
+
+/* The recessed area the strips sit in, exactly as the desktop groups them. It
+ * is what makes a row of cards read as one row of things rather than as a
+ * handful of unrelated panels -- and it is why the input devices and the
+ * channels share it rather than getting a container each. */
+.well {
+    flex: 1;
+    /* Grows into whatever height is going -- that is what removes the dead band
+     * under the cards -- but never below a strip's own usable size. A short
+     * landscape phone scrolls `main` past it instead of clipping the FX button
+     * off the bottom of every card. */
+    min-height: 320px;
+    /* And the same on the other axis, which is not optional: a flex item's
+     * automatic minimum is its content, so without this the well is as wide as
+     * the whole row of strips, the rail never reports an overflow, and the row
+     * runs off the side of the page instead of scrolling inside it. */
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--well);
+    border-radius: 14px;
+    margin: 10px 12px;
+    padding: 10px 0 6px;
+}
+
+/* The swipeable row of strips. Snap so a flick lands on a card rather than
+ * halfway across two, which on a phone is the difference between a control
+ * surface and a scrolling page. */
+.rail {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    padding: 0 10px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior: contain;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+}
+.rail::-webkit-scrollbar { display: none; }
+.rail > * { scroll-snap-align: start; }
+/* Set while the scrollbar thumb is being dragged. Mandatory snap fights a
+ * scrollLeft written every frame -- the browser keeps pulling back to the
+ * nearest card -- so the snap is suspended for the length of the drag and
+ * restored after it, which is also when a flick should land on a card again. */
+.rail.is-scrubbing { scroll-snap-type: none; }
+
+/* Where the input devices end and the channels begin. Labels read sideways and
+ * the arrows point at the side they name, which is the desktop's separator
+ * translated rather than reinvented. */
+.rail-divider {
+    flex: none;
+    width: 30px;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    color: var(--faint);
+    /* Never a snap target: a flick that landed here would stop on a label
+     * instead of on a control. */
+    scroll-snap-align: none;
+}
+.rail-divider .grp {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 0;
+}
+.rail-divider svg { width: 18px; height: 18px; flex: none; }
+.vcap {
+    writing-mode: vertical-rl;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 0;
+}
+/* Reading bottom-to-top, for the label above the row's midpoint. */
+.vcap.is-up { transform: rotate(180deg); }
+
+/* The optional drag bar under the rail. One for the whole row, because there is
+ * one row: two would each scroll half of a thing the user reads as continuous.
+ * A setting because a wide screen with every card visible has nothing to
+ * scroll, while a phone showing two at a time needs a way across that is not
+ * eleven swipes. */
+.scroll-host { padding: 6px 12px 0; flex: none; }
+
+.scrollbar {
+    position: relative;
+    height: 10px;
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--line) 45%, transparent);
+    touch-action: none;
+    cursor: pointer;
+}
+.scrollbar-thumb {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 9999px;
+    background: var(--line);
+    /* Position is written on every scroll event; a transition here would make
+     * the bar trail a finger that is already somewhere else. */
+    transition: background 140ms;
+    will-change: transform;
+}
+.scrollbar:hover .scrollbar-thumb { background: var(--faint); }
+.scrollbar.is-dragging .scrollbar-thumb { background: var(--dim); }
+
+.strip {
+    flex: none;
+    /* Three faders wide, matching the desktop's wide card. The microphone
+     * column is always present -- greyed rather than absent when the card
+     * publishes no microphone -- so the width never changes underfoot and the
+     * row does not reflow when a channel starts or stops publishing one. */
+    width: 196px;
+    /* No height: the rail stretches its children, so a strip is as tall as the
+     * well and the fader inside it takes whatever is left over. Fixed heights
+     * were what left a band of dead space under the cards on a tall screen. */
+    min-height: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    /* Tighter than the 10px it was: the card now stacks a heading, the link
+     * toggle, the faders and the heartbeat, and at 10px the four gaps between
+     * them came out of the faders' own height on a short screen. */
+    gap: 8px;
+}
+.strip.is-offline { opacity: 0.55; }
+
+.tile {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--tint) 22%, transparent);
+    color: var(--tint);
+    flex: none;
+}
+.tile svg { width: 20px; height: 20px; }
+
+/* ---- meters ---------------------------------------------------------- */
+
+.meter {
+    background: var(--well);
+    border-radius: 9999px;
+    overflow: hidden;
+    position: relative;
+}
+.meter-v { width: 6px; }
+.meter-h { height: 7px; flex: 1 1 0%; }
+
+/* The microphone meter, on the far side of the faders. Violet rather than the
+ * card's colour, the same as the desktop's thin second bar: it is deliberately
+ * not the card's own hue, because it is not the card's output -- it is the
+ * microphone feeding it, upstream of every fader on the card.
+ *
+ * Greyed, not hidden, when there is no microphone to meter: a bar that
+ * disappears makes the card change shape, and a bar that stays black makes the
+ * user wonder whether the microphone is silent or absent. */
+.meter-mic .meter-fill { background: var(--violet); }
+.meter-mic.is-inert { opacity: 0.4; }
+.meter-mic.is-inert .meter-fill { background: var(--line); }
+.meter-fill {
+    position: absolute;
+    background: var(--tint);
+    border-radius: 9999px;
+    /* Short enough to still read as instantaneous, long enough that a peak
+     * meter arriving at 20 Hz does not strobe. */
+    transition: transform 60ms linear;
+    will-change: transform;
+}
+.meter-v .meter-fill {
+    left: 0; right: 0; bottom: 0; height: 100%;
+    transform: scaleY(0);
+    transform-origin: bottom;
+}
+.meter-h .meter-fill {
+    top: 0; bottom: 0; left: 0; width: 100%;
+    transform: scaleX(0);
+    transform-origin: left;
+}
+
+/* ---- faders ---------------------------------------------------------- */
+
+.fader {
+    position: relative;
+    touch-action: none;
+    cursor: pointer;
+}
+/* Takes whatever height the strip has left after the labels and the buttons,
+ * rather than a fixed one. Below the minimum a fader stops being a fader, so
+ * that is the floor and a short viewport scrolls instead. */
+.fader-v { width: 34px; flex: 1 1 auto; min-height: 84px; }
+.fader-h { height: 34px; flex: 1 1 0%; min-width: 90px; }
+
+.fader-track {
+    position: absolute;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: 9999px;
+    overflow: hidden;
+}
+.fader-v .fader-track { left: 50%; transform: translateX(-50%); width: 8px; top: 0; bottom: 0; }
+.fader-h .fader-track { top: 50%; transform: translateY(-50%); height: 8px; left: 0; right: 0; }
+
+.fader-fill { position: absolute; background: var(--tint); }
+.fader-v .fader-fill { left: 0; right: 0; bottom: 0; }
+.fader-h .fader-fill { top: 0; bottom: 0; left: 0; }
+
+/* A bar, like the desktop's. A round knob on a vertical fader reads as a
+ * scrollbar; the bar reads as a level. */
+.fader-knob {
+    position: absolute;
+    background: var(--fader);
+    border-radius: 3px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+}
+/* Travel is the track less the knob, so full scale puts the knob's edge at the
+ * end rather than half of it past it. The script does that arithmetic in calc()
+ * against the element's own size; nothing here may add an offset to it. */
+.fader-v .fader-knob { left: 3px; right: 3px; height: 12px; }
+.fader-h .fader-knob { top: 3px; bottom: 3px; width: 12px; }
+
+.fader.is-muted .fader-fill { background: var(--faint); }
+.fader.is-muted .fader-knob { background: var(--faint); }
+
+
+/* ---- toggles --------------------------------------------------------- */
+
+.switch {
+    width: 44px;
+    height: 26px;
+    border-radius: 9999px;
+    background: var(--line);
+    border: none;
+    padding: 0;
+    position: relative;
+    flex: none;
+    cursor: pointer;
+    transition: background 160ms;
+}
+.switch::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 20px;
+    height: 20px;
+    border-radius: 9999px;
+    background: var(--fg);
+    transition: transform 160ms;
+}
+.switch.is-on { background: var(--accent-dim); }
+.switch.is-on::after { transform: translateX(18px); background: var(--accent); }
+
+.icon-btn {
+    width: 40px;
+    height: 34px;
+    border-radius: 9px;
+    background: var(--well);
+    border: 1px solid var(--line);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--dim);
+    padding: 0;
+    flex: none;
+}
+.icon-btn svg { width: 18px; height: 18px; }
+.icon-btn.is-on { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+.icon-btn.is-tint { color: var(--tint); border-color: color-mix(in srgb, var(--tint) 55%, var(--line)); }
+
+/* Meter, three fader columns, meter. Tighter than the card's own 8px stack:
+ * five things across 196px, and the gaps come out of the faders. */
+.strip-body { gap: 6px; }
+
+/* Whether you hear this card's microphone in the Monitor mix. Sits beside the
+ * name because that is where the desktop puts it, and because it is a property
+ * of the card rather than of either mix below it. The card's own colour when
+ * on -- "I am hearing this one" answered in the hue of the one it means. */
+.ear-btn {
+    width: 32px;
+    height: 30px;
+}
+.ear-btn svg { width: 17px; height: 17px; }
+.ear-btn.is-on {
+    color: var(--tint);
+    border-color: var(--tint);
+    background: color-mix(in srgb, var(--tint) 16%, var(--well));
+}
+
+/* ---- the three mix columns ------------------------------------------- */
+/*
+ * Monitor, Stream and the card's microphone, in that order, matching the
+ * desktop. There are no captions over them: the glyph on each column's mute
+ * button says which mix it is, and on a card this narrow a word above the
+ * fader and an icon below it were saying the same thing twice.
+ */
+.mix-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 0;
+    /* Greying is animated so a channel that starts publishing a microphone
+     * lights its column rather than snapping into being live. */
+    transition: opacity 160ms ease;
+}
+/* A live-looking fader that reaches nothing is the one thing a remote surface
+ * must never show, so the controls stop taking input -- but the column itself
+ * goes on doing so, because the tooltip explaining why is on the column and a
+ * dead element has no hover to show it with. */
+.mix-col.is-inert { opacity: 0.35; }
+.mix-col.is-inert .fader,
+.mix-col.is-inert .icon-btn { pointer-events: none; }
+/* Buttons fill their column so the three read as one row of equal targets
+ * rather than three pills floating in the middle of unequal gaps. */
+.mix-col .icon-btn {
+    width: 100%;
+    height: 30px;
+}
+.mix-col .icon-btn svg { width: 17px; height: 17px; }
+
+/* Keeps both mix faders equal, exactly as the desktop's "=" does: switching it
+ * on moves nothing, and from the next touch either one drags the other to the
+ * same value. Card colour when on, because it is a property of this card. */
+.link-row { display: flex; justify-content: center; flex: none; }
+.link-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--well);
+    color: var(--faint);
+    cursor: pointer;
+}
+.link-btn svg { width: 17px; height: 17px; }
+.link-btn.is-on {
+    color: var(--tint);
+    border-color: var(--tint);
+    background: color-mix(in srgb, var(--tint) 16%, var(--well));
+}
+
+/* The effects control: off, on, or on and audible in the monitor mix. One
+ * button rather than two switches, cycling forward on tap, because that is
+ * what the desktop strip does and a companion that disagrees about what a
+ * control means is worse than no companion.
+ *
+ * The heartbeat alone, and the three states are told apart the way the desktop
+ * tells them apart: dim when bypassed, white when the chain is running, and the
+ * card's own colour when the chain is also in your headphones. The word "FX"
+ * that used to sit beside it named the button, which the glyph already does. */
+.fx-row { display: flex; justify-content: center; flex: none; }
+.fx-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 58px;
+    height: 32px;
+    padding: 0;
+    border-radius: 10px;
+    background: var(--well);
+    border: 1px solid var(--line);
+    color: var(--faint);
+    cursor: pointer;
+}
+.fx-btn svg { width: 18px; height: 18px; }
+.fx-btn.is-on { color: var(--fg); border-color: var(--dim); }
+.fx-btn.is-monitor {
+    color: var(--tint);
+    border-color: var(--tint);
+    background: color-mix(in srgb, var(--tint) 14%, var(--well));
+}
+
+.badge {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: var(--well);
+    color: var(--faint);
+}
+.badge.is-warn { color: var(--warn); }
+
+.row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+select {
+    background: var(--well);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 8px;
+    font-size: 13px;
+    min-height: 36px;
+    max-width: 100%;
+    appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239a9aa4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6l6 -6'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    padding-right: 26px;
+}
+
+.footer {
+    flex: none;
+    background: var(--card);
+    border-top: 1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    z-index: 1;
+}
+/* The scroll and the height cap live on the rows rather than on the footer:
+ * the collapse animates the band's height, and a scroller wrapped around the
+ * thing being animated would fight it. */
+.out-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 2px 12px 8px;
+    max-height: 42vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.out-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;
+}
+.out-row.is-offline { opacity: 0.5; }
+.out-name { width: 108px; flex: none; }
+
+@media (max-width: 480px) {
+    .out-name { width: 74px; }
+    /* Narrower strips so a phone fits one and a bit: the partial second card is
+     * what tells anyone there is more of the row to reach. Three faders set the
+     * floor -- below this the columns are narrower than a fader. */
+    .strip { width: 180px; }
+    .well { margin: 8px; }
+    .rail { padding-left: 8px; padding-right: 8px; }
+    .scroll-host { padding-left: 8px; padding-right: 8px; }
+}
+
+/* ---- modal ----------------------------------------------------------- */
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.62);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 40;
+    padding: 16px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}
+@media (min-width: 640px) { .modal { align-items: center; } }
+
+.modal-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    width: 100%;
+    max-width: 420px;
+    max-height: 80vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 16px;
+}
+
+/* A segmented control rather than a row of underlines: two tabs on a sheet this
+ * narrow need to look like one control with a selected half, or the unselected
+ * one reads as a heading nobody thinks to press. */
+.tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 4px;
+    margin-bottom: 12px;
+}
+.tab {
+    flex: 1 1 0%;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    padding: 9px 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--dim);
+    cursor: pointer;
+    min-height: 38px;
+    transition: background 140ms, color 140ms;
+}
+.tab.is-active {
+    background: var(--card-hover);
+    color: var(--fg);
+}
+
+.modal-section {
+    margin: 16px 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+}
+.modal-section:first-of-type { margin-top: 6px; }
+
+.profile-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px;
+    cursor: pointer;
+    min-height: 48px;
+}
+.profile-item.is-active { border-color: var(--accent); color: var(--accent); }
+
+/* A whole-page veil while the socket is down. Controls that cannot reach the
+ * daemon must not look live: a fader that moves and changes nothing is the
+ * single most misleading thing a remote surface can do. */
+.offline-veil {
+    position: fixed;
+    inset: 0;
+    background: rgba(12, 12, 14, 0.72);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+    text-align: center;
+    padding: 24px;
+}
+
+/* ---- view switching (Mixer <-> Soundboard) ---------------------------- */
+/*
+ * Two panes side by side, moved as one strip by a horizontal drag on the
+ * header (see app.js's header pointer handlers). translateX in whole pane
+ * widths only -- there is no page-under-your-thumb rubber banding beyond the
+ * two endpoints, because there are only ever two views to be between.
+ */
+.view-track {
+    display: flex;
+    width: 200%;
+    height: 100%;
+    transition: transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Set for the span of an active finger-drag, so the strip tracks the finger
+ * exactly instead of chasing it through an eased transition meant for the
+ * settle at the end. Not gated by Reduce Motion, unlike everything else that
+ * setting turns off on this page: swiping between the two views is how you
+ * get to the Soundboard at all, and losing the slide loses the "this is the
+ * next thing over" spatial cue it exists to give, which is worth more here
+ * than it costs -- the same call the fold above it does not make either. */
+.view-track.is-dragging { transition: none; }
+
+.view-pane {
+    flex: 0 0 50%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* The dot pair under the header row: which view is showing, and a tap target
+ * for anyone who does not think to drag the header itself. */
+.view-dots {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding-bottom: 10px;
+}
+.vdot {
+    width: 16px;
+    height: 6px;
+    padding: 0;
+    border: none;
+    border-radius: 9999px;
+    background: var(--line);
+    cursor: pointer;
+    transition: background 160ms, width 160ms;
+}
+.no-motion .vdot { transition: none; }
+.vdot.is-active { background: var(--dim); width: 22px; }
+
+/* ---- soundboard --------------------------------------------------------- */
+/*
+ * Play and reorder only. Sounds are shown as landscape pads, roughly 128x64
+ * but grid-stretched to fill whatever the viewport gives -- "adapt" was the
+ * point, not a pixel-exact size -- arranged into however many fit the screen
+ * at once, chunked into pages app.js paginates by measuring the grid the
+ * same way railView measures the mixer row.
+ */
+.sb-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.sb-pages {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior: contain;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+}
+.sb-pages::-webkit-scrollbar { display: none; }
+/* Suspended for the length of a pad drag: a reorder drag that nudges the
+ * page's own scroll position mid-gesture is fighting mandatory snap the same
+ * way the mixer rail's scrollbar drag does -- see .rail.is-scrubbing. */
+.sb-pages.is-reordering { scroll-snap-type: none; overflow-x: hidden; }
+
+.sb-page {
+    flex: 0 0 100%;
+    min-width: 0;
+    scroll-snap-align: start;
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    align-content: start;
+}
+
+.sb-pad {
+    position: relative;
+    aspect-ratio: 2 / 1;
+    min-height: 56px;
+    width: 100%;
+    border: none;
+    border-radius: 14px;
+    background: var(--card);
+    color: var(--fg);
+    padding: 0 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+    transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.no-motion .sb-pad { transition: none; }
+.sb-pad:active { background: var(--card-hover); }
+
+.sb-pad-name {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    line-height: 1.25;
+    pointer-events: none;
+}
+
+/* The progress ring: an SVG rect traced around the pad's own border, its
+ * dash offset driven by levels.soundboard (see renderSoundboardProgress()).
+ * pathLength="1" on the rect normalises the dash math to the fraction
+ * played regardless of the pad's actual rendered size, so nothing here has
+ * to know how big a pad ended up on this particular screen. Neutral white,
+ * not the mixer's per-channel tint: "this one is making noise right now" is
+ * a status every pad shows the same way, exactly the reasoning the desktop
+ * Soundboard's own PlayPad and MiniWaveform already settled on.
+ */
+.pad-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 160ms ease;
+}
+.no-motion .pad-ring { transition: none; }
+.sb-pad.is-playing .pad-ring { opacity: 1; }
+.pad-ring rect {
+    fill: none;
+    stroke: #f2f2f5;
+    stroke-width: 2.4;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    transition: stroke-dashoffset 90ms linear;
+}
+.no-motion .pad-ring rect { transition: none; }
+.sb-pad.is-playing {
+    box-shadow: 0 0 0 1px rgba(242, 242, 245, 0.5), 0 0 14px rgba(242, 242, 245, 0.22);
+}
+
+/* Long-press-activated drag, the iOS homescreen gesture: the pad under the
+ * finger lifts and follows it 1:1 (positioned, not transitioned -- a
+ * transition here would lag a finger that has already moved on), everything
+ * else keeps taking its normal grid slot until the drop reorders them. */
+.sb-pad.is-dragging {
+    position: fixed;
+    z-index: 50;
+    transition: none;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--line);
+    cursor: grabbing;
+}
+/* The slot a dragged pad came from, while it is elsewhere on the screen: a
+ * hole rather than nothing, so the grid does not jump when the drag ends. */
+.sb-pad.is-drag-source { opacity: 0; }
+/* Everything else's own reflow into the gap -- the part of the gesture that
+ * is genuinely decorative, so it is the one soundboard transition Reduce
+ * Motion turns off along with the rest. */
+.sb-page.is-reflowing .sb-pad:not(.is-dragging) { transition: transform 160ms ease; }
+.no-motion .sb-page.is-reflowing .sb-pad:not(.is-dragging) { transition: none; }
+
+.sb-dots {
+    flex: none;
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    padding: 2px 0 10px;
+}
+.sb-dots .vdot { width: 6px; height: 6px; }
+.sb-dots .vdot.is-active { width: 16px; background: var(--accent); }
+
+@media (max-width: 480px) {
+    .sb-page { padding: 10px; gap: 8px; }
+}

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    SPDX-License-Identifier: GPL-2.0-or-later
+    Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+
+    The home-screen icon. A waveform rather than a wordmark: at the size a
+    phone draws this, four letters are a grey smudge.
+  -->
+  <rect width="64" height="64" rx="14" fill="#121214"/>
+  <path d="M8 32h6l5 14l8 -30l7 22l5 -12l4 6h13"
+        fill="none" stroke="#3dd68c" stroke-width="4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

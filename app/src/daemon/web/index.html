@@ -1,0 +1,221 @@
+<!doctype html>
+<!--
+  SPDX-License-Identifier: GPL-2.0-or-later
+  Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+
+  The shell only. Everything inside the sections is built by app.js from the
+  state the daemon pushes, because there is nothing here that can be known
+  before the socket is open: how many input devices exist, what they are
+  called, and how many monitor mixes they feed are all answers the daemon has.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#121214">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<!--
+  iOS will not take an SVG here: an apple-touch-icon has to be a PNG, and a
+  home screen given anything else quietly falls back to a screenshot of the
+  page. It also composites any transparency onto black before laying its own
+  rounded mask over the result, so the file served here is deliberately opaque
+  and square to its edges.
+-->
+<link rel="apple-touch-icon" sizes="180x180" href="/app-icon.png">
+<meta name="apple-mobile-web-app-title" content="Waveline">
+<link rel="stylesheet" href="/app.css">
+<title>Waveline Companion</title>
+</head>
+<body>
+
+<div class="flex flex-col h-full">
+
+  <!--
+    Header and footer both collapse. On a phone in landscape the mixer row is
+    the only thing worth the height, and the two bands around it are reference
+    rather than control -- so each carries a tab on the edge facing the mixer,
+    which is where the space it gives back appears.
+  -->
+  <header class="header" id="header">
+    <div class="collapsible"><div class="collapsible-inner">
+    <div class="flex items-center justify-between gap-3 px-4 py-3">
+      <div class="min-w-0">
+        <div class="wordmark">WAVELINE</div>
+        <div class="text-xs text-faint tracking-wide tabular-nums" id="version">companion</div>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <div class="text-right min-w-0">
+          <div class="flex items-center justify-end gap-2">
+            <span class="dot" id="conn-dot"></span>
+            <span class="text-sm font-medium truncate" id="conn-text">Connecting…</span>
+          </div>
+          <div class="text-xs text-faint tabular-nums truncate" id="conn-host">&mdash;</div>
+        </div>
+
+        <!--
+          Icon only, and the same glyph the desktop's profile button now
+          carries. The active profile's name used to be the label here; it is
+          the first thing the panel behind it shows, and a name of any length
+          was pushing the connection status off a phone's header.
+        -->
+        <button class="btn btn-icon" id="profile-btn" type="button" aria-label="Profiles">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 10h-16l5.5 -6"/><path d="M4 14h16l-5.5 6"/>
+          </svg>
+        </button>
+
+        <button class="btn btn-icon" id="settings-btn" type="button" aria-label="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.3 4.3a1.7 1.7 0 0 1 3.4 0 1.7 1.7 0 0 0 2.6 1 1.7 1.7 0 0 1 2.4 2.4 1.7 1.7 0 0 0 1 2.6 1.7 1.7 0 0 1 0 3.4 1.7 1.7 0 0 0-1 2.6 1.7 1.7 0 0 1-2.4 2.4 1.7 1.7 0 0 0-2.6 1 1.7 1.7 0 0 1-3.4 0 1.7 1.7 0 0 0-2.6-1 1.7 1.7 0 0 1-2.4-2.4 1.7 1.7 0 0 0-1-2.6 1.7 1.7 0 0 1 0-3.4 1.7 1.7 0 0 0 1-2.6 1.7 1.7 0 0 1 2.4-2.4 1.7 1.7 0 0 0 2.6-1"/>
+            <path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0-6 0"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!--
+      The swipe surface for switching between the Mixer and the Soundboard
+      (see #view-track in <main>), and a fallback for anyone who does not
+      think to drag a header: two dots, the active one lit, either one
+      tappable. app.js owns both the drag and the tap.
+    -->
+    <div class="view-dots" id="view-dots" role="tablist" aria-label="View">
+      <button class="vdot is-active" type="button" data-view="mixer"
+              role="tab" aria-selected="true" aria-label="Mixer"></button>
+      <button class="vdot" type="button" data-view="soundboard"
+              role="tab" aria-selected="false" aria-label="Soundboard"></button>
+    </div>
+    </div></div>
+
+    <div class="edge-bar">
+      <button class="edge-toggle" id="header-toggle" type="button"
+              aria-label="Collapse the header" aria-expanded="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6l6 -6"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!--
+    One well holding the input devices and the channels, the way the desktop
+    mixer does it: they are the two halves of one signal path, and drawing them
+    as two panels made them read as two unrelated things. The divider between
+    them carries the labels and points at which side is which -- again the
+    desktop's, so the two surfaces are recognisably the same mixer.
+  -->
+  <!--
+    Two panes wide, one screen's worth showing at a time. #view-track is what
+    #header's swipe (and the dots above it) actually move -- translateX(0) for
+    the mixer, translateX(-50%) for the soundboard -- so switching views is a
+    property of the whole page, not a per-panel show/hide.
+  -->
+  <main class="flex-1 flex min-h-0 overflow-hidden" id="main">
+    <div class="view-track" id="view-track">
+      <div class="view-pane overflow-y-auto" id="view-mixer">
+        <div class="well">
+          <div class="rail" id="rail"></div>
+          <div class="scroll-host" id="rail-scroll" hidden></div>
+        </div>
+      </div>
+
+      <!--
+        Play and reorder only -- no add, no edit, no delete. Managing the
+        board (naming sounds, trimming them, choosing where they play) stays
+        on the desktop mixer; this is a performance surface for sounds that
+        already exist, the same division the rest of the companion draws
+        between "what a person moves mid-stream" and "what they set up once".
+      -->
+      <div class="view-pane" id="view-soundboard">
+        <div class="sb-empty" id="sb-empty" hidden>
+          <div class="text-sm text-faint" style="text-align:center; padding:0 24px;">
+            No sounds on the board yet.<br>Add some from the desktop mixer.
+          </div>
+        </div>
+        <div class="sb-pages" id="sb-pages"></div>
+        <div class="sb-dots" id="sb-dots" hidden></div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer" id="footer">
+    <div class="edge-bar">
+      <button class="edge-toggle" id="footer-toggle" type="button"
+              aria-label="Collapse the output mixes" aria-expanded="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6l6 -6"/>
+        </svg>
+      </button>
+    </div>
+    <div class="collapsible"><div class="collapsible-inner">
+      <div class="out-rows" id="out-rows"></div>
+    </div></div>
+  </footer>
+</div>
+
+<div class="modal" id="profile-modal" hidden>
+  <div class="modal-card">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-lg font-semibold" style="margin:0">Profiles</h2>
+      <button class="icon-btn" id="profile-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <p class="text-xs text-faint mb-2">
+      Switching loads a saved setup. Your day-to-day changes are remembered
+      separately and are not overwritten.
+    </p>
+    <div class="flex flex-col gap-2" id="profile-list"></div>
+  </div>
+</div>
+
+<div class="modal" id="settings-modal" hidden>
+  <div class="modal-card">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-lg font-semibold" style="margin:0">Settings</h2>
+      <button class="icon-btn" id="settings-close" type="button" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <!--
+      Two tabs rather than two headings on one long sheet. The device half is a
+      couple of switches, set once and forgotten; the applications half is a
+      live list that grows with whatever is playing, and on a phone a busy one
+      buried everything else under a scroll nobody knew was there.
+    -->
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" id="tab-device" type="button" role="tab"
+              aria-selected="true" aria-controls="device-settings">This device</button>
+      <button class="tab" id="tab-apps" type="button" role="tab"
+              aria-selected="false" aria-controls="app-settings">Applications</button>
+    </div>
+
+    <div class="flex flex-col gap-2" id="device-settings" role="tabpanel"
+         aria-labelledby="tab-device"></div>
+    <div class="flex flex-col gap-2" id="app-settings" role="tabpanel"
+         aria-labelledby="tab-apps" hidden></div>
+  </div>
+</div>
+
+<div class="offline-veil" id="veil" hidden>
+  <div>
+    <div class="text-lg font-semibold mb-1" id="veil-title">Reconnecting…</div>
+    <div class="text-sm text-dim" id="veil-body">Waiting for wavelined.</div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
