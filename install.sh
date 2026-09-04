@@ -186,7 +186,7 @@ mixer_deps_ok() {
 	for tool in cmake g++ pkg-config; do
 		command -v "$tool" >/dev/null || { warn "missing $tool"; return 1; }
 	done
-	for lib in Qt6Widgets Qt6DBus Qt6Svg libpipewire-0.3 rnnoise; do
+	for lib in Qt6Widgets Qt6DBus Qt6Svg Qt6WebSockets libpipewire-0.3 rnnoise; do
 		pkg-config --exists "$lib" 2>/dev/null || { warn "missing $lib (pkg-config)"; return 1; }
 	done
 	return 0
@@ -200,7 +200,7 @@ build_deps_ok() {
 	buildenv_ready || { warn "${BUILDENV_ERR:-build environment unavailable}"; return 1; }
 	buildenv_run "$ROOT" sh -c '
 		for t in cmake g++ pkg-config; do command -v $t >/dev/null || exit 1; done
-		for l in Qt6Widgets Qt6DBus Qt6Svg libpipewire-0.3 rnnoise; do
+		for l in Qt6Widgets Qt6DBus Qt6Svg Qt6WebSockets libpipewire-0.3 rnnoise; do
 			pkg-config --exists $l || exit 1
 		done' >/dev/null 2>&1 \
 	  || { warn "the build container is missing a development package"; return 1; }
@@ -210,9 +210,10 @@ build_deps_ok() {
 deps_hint() {
 	case "$FAM" in
 	arch)   warn "    sudo pacman -S --needed cmake qt6-base qt6-svg qt6-websockets pipewire rnnoise base-devel" ;;
-	fedora) warn "    sudo dnf install cmake qt6-qtbase-devel qt6-qtsvg-devel qt6-qtwebsockets-devel pipewire-devel rnnoise-devel" ;;
-	debian) warn "    sudo apt install cmake qt6-base-dev libqt6svg6-dev libqt6websockets6-dev libpipewire-0.3-dev librnnoise-dev" ;;
-	*)      warn "    cmake, Qt6 (Widgets + DBus + Svg + WebSockets), libpipewire-0.3, rnnoise" ;;
+	fedora) warn "    sudo dnf install cmake pkgconf-pkg-config gcc-c++ qt6-qtbase-devel qt6-qtsvg-devel qt6-qtwebsockets-devel pipewire-devel rnnoise-devel" ;;
+	debian) warn "    sudo apt install cmake pkg-config build-essential qt6-base-dev qt6-base-dev-tools libqt6svg6-dev libqt6websockets6-dev libpipewire-0.3-dev librnnoise-dev" ;;
+	*)      warn "    cmake, pkg-config, a C++ compiler, Qt6 >= 6.4 (Widgets + DBus +"
+	        warn "    Svg + Network + WebSockets), libpipewire-0.3, rnnoise" ;;
 	esac
 }
 
@@ -718,6 +719,15 @@ arch)
 		warn "  If a package was 'not found', your package DB is stale --"
 		warn "  run:  sudo pacman -Syu     then re-run this script."
 	fi
+	# The mixer's build dependencies, installed separately from the list
+	# above and deliberately tolerant of failure: the kernel module, the
+	# WirePlumber rules and waveline-hw must not be lost because one package
+	# was renamed upstream. If something here does not land, mixer_deps_ok
+	# reports exactly which piece is missing and the mixer step is skipped.
+	MIXER_PKGS=(cmake qt6-base qt6-svg qt6-websockets pipewire rnnoise)
+	ok "pacman -S ${MIXER_PKGS[*]}   (mixer)"
+	pacman -S --needed --noconfirm "${MIXER_PKGS[@]}" \
+	  || warn "not every mixer dependency installed -- step 8 will name the missing one"
 	;;
 debian)
 	export DEBIAN_FRONTEND=noninteractive
@@ -730,6 +740,16 @@ debian)
 		apt-get install -y --no-install-recommends dkms build-essential curl \
 		  python3 xz-utils usbutils linux-headers-generic || warn "apt install failed"
 	}
+	# The mixer's build dependencies, installed separately from the list
+	# above and deliberately tolerant of failure: the kernel module, the
+	# WirePlumber rules and waveline-hw must not be lost because one package
+	# was renamed upstream. If something here does not land, mixer_deps_ok
+	# reports exactly which piece is missing and the mixer step is skipped.
+	MIXER_PKGS=(cmake pkg-config qt6-base-dev qt6-base-dev-tools libqt6svg6-dev
+	            libqt6websockets6-dev libpipewire-0.3-dev librnnoise-dev)
+	ok "apt-get install ${MIXER_PKGS[*]}   (mixer)"
+	apt-get install -y --no-install-recommends "${MIXER_PKGS[@]}" \
+	  || warn "not every mixer dependency installed -- step 8 will name the missing one"
 	;;
 fedora)
 	PKGS=(dkms "kernel-devel-$KREL" gcc make curl git python3 xz tar usbutils elfutils-libelf-devel)
@@ -740,11 +760,24 @@ fedora)
 		dnf install -y dkms kernel-devel gcc make curl python3 xz tar usbutils \
 		  elfutils-libelf-devel || warn "dnf install failed"
 	}
+	# The mixer's build dependencies, installed separately from the list
+	# above and deliberately tolerant of failure: the kernel module, the
+	# WirePlumber rules and waveline-hw must not be lost because one package
+	# was renamed upstream. If something here does not land, mixer_deps_ok
+	# reports exactly which piece is missing and the mixer step is skipped.
+	MIXER_PKGS=(cmake pkgconf-pkg-config gcc-c++ qt6-qtbase-devel qt6-qtsvg-devel
+	            qt6-qtwebsockets-devel pipewire-devel rnnoise-devel)
+	ok "dnf install ${MIXER_PKGS[*]}   (mixer)"
+	dnf install -y "${MIXER_PKGS[@]}" \
+	  || warn "not every mixer dependency installed -- step 8 will name the missing one"
 	;;
 *)
 	warn "unrecognised distro -- skipping package installation"
 	warn "  needed: dkms, kernel headers for $KREL, gcc, make, curl, git, python3,"
 	warn "          tar, xz, and cargo/rustc >= 1.70 for DeepFilterNet"
+	warn "  for the mixer: cmake, pkg-config, a C++ compiler, Qt6 >= 6.4"
+	warn "          (Widgets + DBus + Svg + Network + WebSockets), libpipewire-0.3,"
+	warn "          rnnoise -- all with their development headers"
 	;;
 esac
 fi
