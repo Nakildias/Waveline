@@ -1484,6 +1484,14 @@ fi
 say "Device profile"
 CONFD="$HOME_N/.config/waveline"
 install -d -o "$RUSER" -g "$RUSER" "$CONFD"
+# The other two directories wavelined.service lists in ReadWritePaths. The unit
+# tolerates them being absent, but a path it skipped is a path the daemon cannot
+# write under ProtectHome=read-only -- and then the ALSA aliases and the
+# WirePlumber headroom drop-in silently never get written. ~/.config/alsa is
+# otherwise created only by scripts/install-alsa-aliases.sh, which runs inside a
+# conditional branch, so on a machine that skips it nothing creates it at all.
+install -d -o "$RUSER" -g "$RUSER" \
+	"$HOME_N/.config/alsa" "$HOME_N/.config/wireplumber"
 # Written for wavelined and waveline-mixer to read. App branding is always the
 # generic Waveline mixer; detected device profiles only decide which kernel
 # patches, udev rules and waveline-hw backends get installed.

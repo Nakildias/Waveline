@@ -70,7 +70,15 @@ ProtectHome=read-only
 # ~/.config/wireplumber is for the output-headroom drop-in the mixer writes.
 # Leaving it out does not fail anything visibly: the daemon runs, the setting
 # saves, and the rule silently never reaches WirePlumber.
-ReadWritePaths=%h/.config/waveline %h/.config/alsa %h/.config/wireplumber
+#
+# Each is prefixed with '-'. Without it, a path that does not exist yet is not a
+# warning but a hard failure: systemd cannot bind-mount what is not there, the
+# unit dies at step NAMESPACE with 226, and Restart=on-failure turns that into a
+# permanent five-second restart loop. ~/.config/alsa is the one that bites --
+# nothing creates it before the daemon's own first run on a machine that has
+# never had an ALSA config. install.sh creates all three, so this is the belt to
+# that braces: a home directory in any state still gets a daemon that starts.
+ReadWritePaths=-%h/.config/waveline -%h/.config/alsa -%h/.config/wireplumber
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
