@@ -1,0 +1,152 @@
+From: Nakildias <nakildiaspro@gmail.com>
+Subject: [PATCH] ALSA: usb-audio: Add UAC1 shared-clock quirk for Elgato Wave:3
+
+The Elgato Wave:3 (0fd9:0070) is a UAC1 device that runs a 2ch headphone
+output (iface 1, EP 0x01) and a 1ch microphone (iface 2, EP 0x82) from a
+single clock domain, while exposing an independent sampling frequency
+control on each endpoint.
+
+UAC1 has no Clock Source unit, so snd_usb_clock_find_source() returns
+-EINVAL and parsed UAC1 audioformats always end up with fp->clock == 0.
+snd_usb_endpoint_open() therefore never instantiates a snd_usb_clock_ref
+for them, which leaves the driver's entire cross-endpoint rate arbitration
+inert on such devices:
+
+  - update_clock_ref_rate() returns early at "if (!clock || ...)", so a
+    mismatch is never detected;
+  - hw_rule_rate() misses all three of its constraints -- the endpoint
+    numbers differ, implicit_fb is false, and
+    snd_usb_endpoint_get_clock_rate() bails at "if (!clock) return 0" --
+    and falls through to fp->rate_table, advertising every rate.
+
+Userspace is thus free to open capture at 96 kHz while playback is already
+streaming at 48 kHz. set_sample_rate_v1() then issues a SET_CUR on EP 0x82
+that asks the firmware to re-lock the clock underneath a live endpoint. It
+stops answering control transfers, and the following usb_set_interface()
+runs out USB_CTRL_SET_TIMEOUT and fails with -ETIMEDOUT while chip->mutex
+is held, wedging the whole card in uninterruptible sleep. Recovering the
+device requires a bus power cycle; a port reset is not sufficient.
+
+Add QUIRK_FLAG_UAC1_SHARED_CLOCK, which tags a device's UAC1 audioformats
+with a synthetic non-zero clock ID so they share one snd_usb_clock_ref and
+join the same arbitration as UAC2/3. Parsed UAC1 formats leave fp->clock at
+0, so this is inert for every other device.
+
+With the quirk applied the second stream to open is constrained to the rate
+already running, and init_sample_rate() skips the redundant SET_CUR via
+clock->need_setup. Tested on 7.1.5: 30 mixed-rate full-duplex open/close
+cycles with a liveness check after every five produced no -ETIMEDOUT, no
+"cannot set freq" errors and no wedge, against 5 rate-request failures in
+20 cycles without it. Both 48 kHz and 96 kHz remain selectable when the
+device is idle.
+
+Signed-off-by: Nakildias <nakildiaspro@gmail.com>
+---
+--- a/sound/usb/usbaudio.h	2026-07-24 10:21:27.000000000 -0400
++++ b/sound/usb/usbaudio.h	2026-07-29 15:42:21.463188857 -0400
+@@ -236,6 +236,10 @@
+  * QUIRK_FLAG_MIXER_CAPTURE_LINEAR_VOL
+  *  Similar to QUIRK_FLAG_MIXER_PLAYBACK_LINEAR_VOL, but for capture streams.
+  *  Overrides QUIRK_FLAG_MIXER_CAPTURE_MIN_MUTE
++ * QUIRK_FLAG_UAC1_SHARED_CLOCK
++ *  Treat all UAC1 audioformats of the device as driven by a single clock
++ *  domain, so the rate of a second stream is arbitrated against the one
++ *  already running instead of being programmed independently.
+  * QUIRK_FLAG_IFB_SILENCE_ON_EMPTY
+  *  In implicit feedback mode, when an entire capture URB returns with
+  *  all iso_frame_desc[i].status != 0 (bytes==0), do not silently return
+@@ -275,6 +279,7 @@
+ 	QUIRK_TYPE_MIXER_PLAYBACK_LINEAR_VOL	= 27,
+ 	QUIRK_TYPE_MIXER_CAPTURE_LINEAR_VOL	= 28,
+ 	QUIRK_TYPE_IFB_SILENCE_ON_EMPTY		= 29,
++	QUIRK_TYPE_UAC1_SHARED_CLOCK		= 30,
+ /* Please also edit snd_usb_audio_quirk_flag_names */
+ };
+ 
+@@ -310,5 +315,15 @@
+ #define QUIRK_FLAG_MIXER_PLAYBACK_LINEAR_VOL	QUIRK_FLAG(MIXER_PLAYBACK_LINEAR_VOL)
+ #define QUIRK_FLAG_MIXER_CAPTURE_LINEAR_VOL	QUIRK_FLAG(MIXER_CAPTURE_LINEAR_VOL)
+ #define QUIRK_FLAG_IFB_SILENCE_ON_EMPTY		QUIRK_FLAG(IFB_SILENCE_ON_EMPTY)
++#define QUIRK_FLAG_UAC1_SHARED_CLOCK		QUIRK_FLAG(UAC1_SHARED_CLOCK)
++
++/*
++ * Synthetic clock ID given to the UAC1 audioformats of a device carrying
++ * QUIRK_FLAG_UAC1_SHARED_CLOCK.  UAC1 has no clock entities at all, so any
++ * non-zero value works; it only has to be identical across the endpoints
++ * that share the clock, and non-zero, because
++ * snd_usb_endpoint_get_clock_rate() treats clock 0 as "no clock".
++ */
++#define UAC1_SHARED_CLOCK_ID			0xff
+ 
+ #endif /* __USBAUDIO_H */
+--- a/sound/usb/stream.c	2026-07-24 10:21:27.000000000 -0400
++++ b/sound/usb/stream.c	2026-07-29 15:42:21.463286666 -0400
+@@ -757,6 +757,19 @@
+ 			num_channels = iterm->bNrChannels;
+ 			chconfig = le16_to_cpu(iterm->wChannelConfig);
+ 		}
++
++		/*
++		 * UAC1 has no Clock Source unit, so snd_usb_clock_find_source()
++		 * cannot tell which endpoints share a clock domain and
++		 * snd_usb_endpoint_open() never instantiates a clock_ref for
++		 * them.  update_clock_ref_rate() and hw_rule_rate() are both
++		 * inert as a result, and nothing stops one substream being
++		 * driven to a rate the other, already streaming, endpoint
++		 * cannot follow.  Devices that really do run capture and
++		 * playback from one clock opt into the arbitration here.
++		 */
++		if (chip->quirk_flags & QUIRK_FLAG_UAC1_SHARED_CLOCK)
++			clock = UAC1_SHARED_CLOCK_ID;
+ 	} else { /* UAC_VERSION_2 */
+ 		struct uac2_input_terminal_descriptor *input_term;
+ 		struct uac2_output_terminal_descriptor *output_term;
+--- a/sound/usb/endpoint.c	2026-07-24 10:21:27.000000000 -0400
++++ b/sound/usb/endpoint.c	2026-07-29 15:42:21.463395146 -0400
+@@ -822,7 +822,13 @@
+ 		if (!ep->iface_ref)
+ 			return NULL;
+ 
+-		if (fp->protocol != UAC_VERSION_1) {
++		/*
++		 * UAC1 formats normally carry no clock and must not share a
++		 * ref; those tagged by QUIRK_FLAG_UAC1_SHARED_CLOCK do, and
++		 * join the same arbitration as UAC2/3.  Parsed UAC1 formats
++		 * leave fp->clock at 0, so this is inert otherwise.
++		 */
++		if (fp->protocol != UAC_VERSION_1 || fp->clock) {
+ 			ep->clock_ref = clock_ref_find(chip, fp->clock);
+ 			if (!ep->clock_ref)
+ 				return NULL;
+--- a/sound/usb/quirks.c	2026-07-24 10:21:27.000000000 -0400
++++ b/sound/usb/quirks.c	2026-07-29 15:42:21.463675754 -0400
+@@ -2572,6 +2572,21 @@
+ 	VENDOR_FLG(0xc502, /* HiBy devices */
+ 		   QUIRK_FLAG_DSD_RAW),
+ 
++	/*
++	 * Elgato Wave:3.  A UAC1 device running a 2ch headphone output
++	 * (iface 1, EP 0x01) and a 1ch microphone (iface 2, EP 0x82) from
++	 * one clock, while exposing an independent sampling-frequency
++	 * control on each endpoint.  Without the arbitration the firmware
++	 * is asked to re-lock the clock underneath a live endpoint; it
++	 * then stops answering control transfers and the following
++	 * usb_set_interface() times out with -ETIMEDOUT while chip->mutex
++	 * is held, wedging the whole card.  The delays and the skipped
++	 * rate readback cover the same firmware's general slowness.
++	 */
++	DEVICE_FLG(0x0fd9, 0x0070, /* Elgato Wave:3 */
++		   QUIRK_FLAG_UAC1_SHARED_CLOCK | QUIRK_FLAG_GET_SAMPLE_RATE |
++		   QUIRK_FLAG_CTL_MSG_DELAY_1M | QUIRK_FLAG_IFACE_DELAY |
++		   QUIRK_FLAG_DISABLE_AUTOSUSPEND),
+ 	{} /* terminator */
+ };
+ 
+@@ -2609,6 +2624,7 @@
+ 	QUIRK_STRING_ENTRY(MIXER_PLAYBACK_LINEAR_VOL),
+ 	QUIRK_STRING_ENTRY(MIXER_CAPTURE_LINEAR_VOL),
+ 	QUIRK_STRING_ENTRY(IFB_SILENCE_ON_EMPTY),
++	QUIRK_STRING_ENTRY(UAC1_SHARED_CLOCK),
+ 	NULL
+ };
+ 

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Waveline Mixer
+GenericName=Audio Mixer
+Comment=Wave Link-style audio mixer for Linux
+Exec=@EXEC@
+Icon=waveline-mixer
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=audio;mixer;pipewire;microphone;stream;elgato;wave;
+StartupWMClass=waveline-mixer

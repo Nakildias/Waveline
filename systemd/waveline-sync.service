@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+# Waveline -- make Linux notice a the microphone's physical controls.
+#
+# The Wave:3 sends no USB status message when you tap the mute pad or turn the
+# dial, so ALSA keeps serving cached values and the desktop shows stale state.
+# This polls the device and writes what changed into the ALSA control.
+#
+# A user service, not a system one: it drives the ALSA mixer and PipeWire sees
+# the result in the user's session.
+#
+#   systemctl --user enable --now waveline-sync
+#   systemctl --user status waveline-sync
+#   journalctl --user -u waveline-sync -f
+#
+# Entirely optional. Nothing else in this repository depends on it, and the
+# device works without it -- you just have to change things from Linux rather
+# than on the microphone.
+
+[Unit]
+Description=Waveline hardware control sync
+Documentation=https://github.com/Nakildias/Waveline
+After=pipewire.service wireplumber.service
+# Not Requires=: if PipeWire is not running this still keeps ALSA correct, and
+# PipeWire picks the values up when it starts.
+Wants=pipewire.service
+# Rate limiting lives in [Unit], not [Service]. Disabled so that a microphone
+# left unplugged for a long time never puts the unit into a failed state.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/waveline-hw --watch
+# The device is often absent at login and gets plugged in later; waveline-hw exits
+# non-zero when it cannot find it, so just keep trying rather than failing.
+Restart=always
+RestartSec=5
+
+# It needs exactly one thing: control transfers to the microphone.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+DeviceAllow=/dev/bus/usb rw
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=default.target

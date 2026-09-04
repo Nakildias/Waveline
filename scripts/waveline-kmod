@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+# Waveline -- carry one patched kernel module without DKMS.
+#
+#   sudo waveline-kmod status
+#   sudo waveline-kmod install /path/to/snd-usb-audio.ko
+#   sudo waveline-kmod load | unload | rebuild | remove
+#
+# Why this exists
+# ---------------
+# DKMS writes the built module into /usr/lib/modules/<release>/updates/dkms and
+# runs depmod. On an atomic system /usr is a read-only image: DKMS cannot write
+# there, and even where it can (SteamOS with steamos-readonly disabled) the next
+# system update replaces the image and silently takes the module with it.
+#
+# So the module lives in /var instead -- writable and persistent on every
+# image-based distribution -- and is swapped in at boot by a system unit rather
+# than found by modprobe:
+#
+#   /var/lib/waveline/modules/<kernel release>/snd-usb-audio.ko
+#
+# Keyed by kernel release on purpose. A module built for one kernel must never
+# load into another, and after a kernel update the path simply does not exist:
+# the stock in-tree driver is used, which is the correct failure mode. Nothing
+# breaks, the patched behaviour is just absent until `waveline-kmod rebuild`.
+#
+# The swap itself is deliberately not a modprobe.d override or a blacklist. If
+# any step fails -- module missing, unsigned under Secure Boot, device busy --
+# the stock driver is what stays loaded, and a machine with a working USB audio
+# driver is worth more than a patched one.
+set -uo pipefail
+
+STATE=/var/lib/waveline
+STORE="$STATE/modules"
+CONF="$STATE/kmod.conf"
+RUNSTATE=/run/waveline-kmod.state
+UNIT=/etc/systemd/system/waveline-kmod.service
+MODULE=snd-usb-audio
+MODULE_U=snd_usb_audio
+KREL="$(uname -r)"
+
+say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
+warn() { printf '    \033[33mwarn\033[0m %s\n' "$*"; }
+die()  { printf '\n\033[31mxx   %s\033[0m\n' "$*" >&2; exit 1; }
+
+need_root() { [[ $EUID -eq 0 ]] || die "run as root:  sudo waveline-kmod $*"; }
+
+ko_path() { printf '%s/%s/%s.ko\n' "$STORE" "${1:-$KREL}" "$MODULE"; }
+
+# The kernel's own build directory, needed only for scripts/sign-file.
+kbuild() {
+	local d
+	for d in "/usr/lib/modules/$KREL/build" "/lib/modules/$KREL/build"; do
+		[[ -d "$d" ]] && { printf '%s\n' "$d"; return 0; }
+	done
+	return 1
+}
+
+# A stock snd-usb-audio to fall back to. Without one, nothing here may unload
+# the running module: no USB audio driver at all is the one outcome worse than
+# an unpatched one.
+stock_module() {
+	local p
+	# The DKMS copies come first because DKMS moves the in-tree module aside
+	# when it installs, so on a machine that once used the DKMS path the
+	# kernel's own directory no longer has one. That machine is reachable from
+	# here: /usr can become read-only later, and uninstall.sh runs this check
+	# on every system regardless.
+	for p in "/var/lib/dkms/snd-usb-audio-waveline/original_module/$KREL/$(uname -m)/$MODULE.ko"* \
+	         "/var/lib/dkms/snd-usb-audio-wave3/original_module/$KREL/$(uname -m)/$MODULE.ko"* \
+	         "/usr/lib/modules/$KREL/kernel/sound/usb/$MODULE.ko"* \
+	         "/lib/modules/$KREL/kernel/sound/usb/$MODULE.ko"*; do
+		[[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+	done
+	return 1
+}
+
+module_loaded() { [[ -d "/sys/module/$MODULE_U" ]]; }
+
+# Is the module currently in the kernel ours?
+#
+# Two independent answers because neither is universal. srcversion is exact but
+# only exposed when the kernel was built with CONFIG_MODULE_SRCVERSION_ALL; the
+# /run stamp is always available but only within the boot that wrote it -- which
+# is exactly the window that matters, since /run is emptied on every boot and
+# the module is loaded fresh each time.
+module_is_ours() {
+	local ko sv_loaded sv_file
+	ko="$(ko_path)"
+	module_loaded || return 1
+	sv_loaded="$(cat "/sys/module/$MODULE_U/srcversion" 2>/dev/null || true)"
+	if [[ -n "$sv_loaded" && -f "$ko" ]]; then
+		sv_file="$(modinfo -F srcversion "$ko" 2>/dev/null || true)"
+		[[ -n "$sv_file" && "$sv_loaded" == "$sv_file" ]] && return 0
+		# srcversion is authoritative when both sides have one.
+		[[ -n "$sv_file" ]] && return 1
+	fi
+	[[ -f "$RUNSTATE" ]] && grep -qx "loaded $KREL" "$RUNSTATE" && return 0
+	return 1
+}
+
+# ------------------------------------------------------------ Secure Boot
+secureboot_on() {
+	if command -v mokutil >/dev/null 2>&1; then
+		mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled' && return 0
+		mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot disabled' && return 1
+	fi
+	local f
+	for f in /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c; do
+		[[ -r "$f" ]] || continue
+		# 4 bytes of EFI attributes, then the value.
+		[[ "$(od -An -t u1 -j4 -N1 "$f" 2>/dev/null | tr -d ' ')" == "1" ]] && return 0
+	done
+	return 1
+}
+
+# A machine-owner key we are allowed to sign with, as "priv:cert", or nothing.
+# Only keys the distribution already generated for exactly this purpose --
+# Waveline never creates a key or asks anyone to enrol one on its behalf.
+signing_key() {
+	if [[ -n "${WAVELINE_MOK_KEY:-}" && -n "${WAVELINE_MOK_CERT:-}" ]]; then
+		printf '%s:%s\n' "$WAVELINE_MOK_KEY" "$WAVELINE_MOK_CERT"; return 0
+	fi
+	local pair
+	for pair in \
+		/etc/pki/akmods/private/private_key.priv:/etc/pki/akmods/certs/public_key.der \
+		/var/lib/shim-signed/mok/MOK.priv:/var/lib/shim-signed/mok/MOK.der \
+		/root/.mok/MOK.priv:/root/.mok/MOK.der
+	do
+		[[ -r "${pair%%:*}" && -r "${pair##*:}" ]] && { printf '%s\n' "$pair"; return 0; }
+	done
+	return 1
+}
+
+sign_module() {
+	local ko="$1" kb key priv cert signer
+	kb="$(kbuild)" || { warn "no kernel build directory; cannot sign"; return 1; }
+	signer="$kb/scripts/sign-file"
+	[[ -x "$signer" ]] || { warn "no $signer; cannot sign"; return 1; }
+	key="$(signing_key)" || return 1
+	priv="${key%%:*}"; cert="${key##*:}"
+	if "$signer" sha256 "$priv" "$cert" "$ko" >/dev/null 2>&1; then
+		ok "signed with $cert"
+		return 0
+	fi
+	warn "signing failed with $cert"
+	return 1
+}
+
+# ------------------------------------------------------------------ install
+cmd_install() {
+	need_root install
+	# --no-load stages and signs the module and installs the boot unit, but
+	# leaves the running kernel alone. install.sh uses it because at the point
+	# it builds the module PipeWire still has the sound card open, and rmmod
+	# would fail on a busy module; it loads it later, once the audio stack is
+	# down. Loading is the default for anyone running this by hand.
+	local load=1
+	if [[ "${1:-}" == "--no-load" ]]; then load=0; shift; fi
+	local src="${1:-}"
+	[[ -n "$src" && -f "$src" ]] || die "usage: waveline-kmod install [--no-load] <snd-usb-audio.ko>"
+
+	local dest_dir="$STORE/$KREL" dest
+	dest="$(ko_path)"
+	install -d -m755 "$dest_dir"
+	install -m644 "$src" "$dest" || die "could not stage $dest"
+	ok "staged $dest"
+
+	# Vermagic has to match or insmod refuses with a bare -EINVAL, which is a
+	# miserable thing to debug. Catch it here, where the reason is obvious.
+	local vm
+	vm="$(modinfo -F vermagic "$dest" 2>/dev/null | awk '{print $1}')"
+	if [[ -n "$vm" && "$vm" != "$KREL" ]]; then
+		rm -f "$dest"
+		die "module was built for kernel $vm but this machine runs $KREL"
+	fi
+
+	if secureboot_on; then
+		say "Secure Boot"
+		ok "Secure Boot is enabled -- an unsigned module will be rejected"
+		if ! sign_module "$dest"; then
+			warn "no machine-owner key available to sign the module with."
+			warn "  The stock driver will keep being used. To fix this, enrol a"
+			warn "  MOK for local module signing, then re-run the installer:"
+			warn "    Bazzite / Bluefin / Aurora:  ujust enroll-secure-boot-key"
+			warn "    Fedora atomic:               sudo kmodgenca && sudo mokutil --import /etc/pki/akmods/certs/public_key.der"
+			warn "    Debian / Ubuntu:             sudo update-secureboot-policy --new-key"
+			warn "  Turning Secure Boot off in firmware also works."
+		fi
+	fi
+
+	install -d -m755 "$STATE"
+	{
+		echo "# Written by waveline-kmod on $(date -u '+%Y-%m-%d %H:%M:%S UTC')."
+		echo "WAVELINE_REPO=\"${WAVELINE_REPO:-}\""
+		echo "WAVELINE_KMOD_KREL=\"$KREL\""
+		echo "WAVELINE_KMOD_PROFILES=\"${WAVELINE_PROFILES:-}\""
+	} > "$CONF"
+	chmod 644 "$CONF"
+
+	cmd_unit_install
+	if [[ $load -eq 1 ]]; then
+		cmd_load
+	else
+		ok "staged, not loaded -- it will be swapped in at the next boot"
+		return 0
+	fi
+}
+
+# The boot-time swap. Ordered after udev has settled so that whatever bound the
+# stock driver has finished doing so, and before sound.target and any user
+# session, so nothing has the microphone open yet.
+cmd_unit_install() {
+	need_root install
+	# The /var copy by preference, and by absolute path: it is the one location
+	# that exists on every one of these systems, is writable, and survives an
+	# image update. /usr/local/bin is a symlink into /var on ostree but part of
+	# the read-only image on SteamOS, so it cannot be relied on in a unit file.
+	local self="$STATE/bin/waveline-kmod"
+	[[ -x "$self" ]] || self="$(command -v waveline-kmod 2>/dev/null || echo "$self")"
+	cat > "$UNIT" <<EOF
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Installed by Waveline. Removed by uninstall.sh or 'waveline-kmod remove'.
+#
+# Swaps the stock snd-usb-audio for Waveline's patched build on systems where
+# DKMS cannot be used. Failing is not fatal: the stock driver stays loaded.
+[Unit]
+Description=Waveline patched snd-usb-audio module
+Documentation=https://github.com/Nakildias/Waveline
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=sound.target
+ConditionPathExists=$STATE/modules
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$self boot
+ExecStop=$self unload
+SuccessExitStatus=0
+
+[Install]
+WantedBy=sysinit.target
+EOF
+	chmod 644 "$UNIT"
+	systemctl daemon-reload >/dev/null 2>&1
+	systemctl enable waveline-kmod.service >/dev/null 2>&1 \
+	  && ok "enabled waveline-kmod.service (loads the module at every boot)" \
+	  || warn "could not enable waveline-kmod.service"
+}
+
+# ---------------------------------------------------------------- load/unload
+cmd_load() {
+	need_root load
+	local ko; ko="$(ko_path)"
+	if [[ ! -f "$ko" ]]; then
+		warn "no module built for kernel $KREL"
+		warn "  the stock snd-usb-audio is in use. To build one for this kernel:"
+		warn "      sudo waveline-kmod rebuild"
+		return 1
+	fi
+	if module_is_ours; then
+		ok "patched $MODULE already loaded"
+		return 0
+	fi
+	if ! stock_module >/dev/null; then
+		warn "no stock $MODULE found for $KREL -- refusing to unload anything"
+		return 1
+	fi
+
+	# Load the stock module first, on purpose. insmod resolves no dependencies
+	# of its own, and snd-usb-audio needs snd-hwdep, snd-usbmidi-lib, snd-pcm
+	# and mc; letting modprobe pull that chain in and then swapping only the
+	# leaf keeps the blast radius to one module.
+	modprobe "$MODULE" >/dev/null 2>&1
+
+	if module_loaded; then
+		if ! rmmod "$MODULE_U" 2>/dev/null; then
+			warn "$MODULE_U is in use -- cannot swap it now"
+			warn "  stop anything holding the microphone (wavelined, pipewire,"
+			warn "  a recording application) and run: sudo waveline-kmod load"
+			return 1
+		fi
+	fi
+
+	if insmod "$ko" 2>/dev/null; then
+		printf 'loaded %s\n' "$KREL" > "$RUNSTATE" 2>/dev/null
+		ok "patched $MODULE loaded from $ko"
+		return 0
+	fi
+
+	# Put the machine back the way it was before saying anything else.
+	modprobe "$MODULE" >/dev/null 2>&1
+	rm -f "$RUNSTATE"
+	warn "insmod failed -- the stock $MODULE has been reloaded"
+	if secureboot_on; then
+		warn "  Secure Boot is enabled and the module is not signed with an"
+		warn "  enrolled key. See: sudo waveline-kmod status"
+	else
+		warn "  see: dmesg | tail -20"
+	fi
+	return 1
+}
+
+# Same as load, but never fails a boot. systemd would otherwise mark
+# sysinit.target degraded over a microphone quirk fix.
+cmd_boot() {
+	cmd_load || true
+	return 0
+}
+
+cmd_unload() {
+	need_root unload
+	module_is_ours || { ok "patched module is not loaded"; rm -f "$RUNSTATE"; return 0; }
+	if ! stock_module >/dev/null; then
+		warn "no stock $MODULE for $KREL -- leaving the patched one loaded"
+		return 1
+	fi
+	if rmmod "$MODULE_U" 2>/dev/null; then
+		modprobe "$MODULE" >/dev/null 2>&1
+		rm -f "$RUNSTATE"
+		ok "stock $MODULE restored"
+		return 0
+	fi
+	warn "$MODULE_U is in use -- not unloaded"
+	return 1
+}
+
+# --------------------------------------------------------------------- misc
+cmd_rebuild() {
+	need_root rebuild
+	# shellcheck disable=SC1090
+	[[ -f "$CONF" ]] && source "$CONF"
+	local repo="${WAVELINE_REPO:-}"
+	[[ -n "$repo" && -x "$repo/install.sh" ]] \
+	  || die "cannot find the Waveline source tree (recorded: ${repo:-none}).
+     Clone it again and run:  sudo ./install.sh --kernel-only"
+	say "Rebuilding the patched module for kernel $KREL"
+	exec bash "$repo/install.sh" --kernel-only
+}
+
+cmd_remove() {
+	need_root remove
+	cmd_unload
+	if [[ -f "$UNIT" ]]; then
+		systemctl disable --now waveline-kmod.service >/dev/null 2>&1
+		rm -f "$UNIT"
+		systemctl daemon-reload >/dev/null 2>&1
+		ok "removed $UNIT"
+	fi
+	rm -rf "$STORE"
+	rm -f "$CONF" "$RUNSTATE"
+	ok "removed $STORE"
+	# Only if nothing else of ours lives there.
+	rmdir "$STATE/bin" "$STATE" 2>/dev/null
+	return 0
+}
+
+cmd_status() {
+	say "Waveline kernel module"
+	printf '    kernel          %s\n' "$KREL"
+	local ko; ko="$(ko_path)"
+	if [[ -f "$ko" ]]; then
+		printf '    built module    %s\n' "$ko"
+	else
+		printf '    built module    (none for this kernel)\n'
+	fi
+	local other=""
+	if [[ -d "$STORE" ]]; then
+		other="$(find "$STORE" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null)"
+		[[ -n "$other" ]] && printf '    built for       %s\n' "$other"
+	fi
+	if module_is_ours; then
+		printf '    loaded          \033[32mpatched (Waveline)\033[0m\n'
+	elif module_loaded; then
+		printf '    loaded          stock %s\n' "$MODULE"
+	else
+		printf '    loaded          not loaded\n'
+	fi
+	printf '    stock fallback  %s\n' "$(stock_module || echo 'NOT FOUND')"
+	if secureboot_on; then
+		local key
+		if key="$(signing_key)"; then
+			printf '    secure boot     enabled, signing key %s\n' "${key##*:}"
+		else
+			printf '    secure boot     \033[33menabled, no signing key\033[0m\n'
+		fi
+	else
+		printf '    secure boot     disabled\n'
+	fi
+	printf '    boot unit       %s\n' \
+	  "$( [[ -f "$UNIT" ]] && systemctl is-enabled waveline-kmod.service 2>/dev/null || echo 'not installed')"
+	[[ -f "$CONF" ]] && printf '    source tree     %s\n' \
+	  "$(. "$CONF" 2>/dev/null; echo "${WAVELINE_REPO:-unknown}")"
+	echo
+	return 0
+}
+
+case "${1:-status}" in
+	install) shift; cmd_install "$@" ;;
+	load)    cmd_load ;;
+	boot)    cmd_boot ;;
+	unload)  cmd_unload ;;
+	rebuild) cmd_rebuild ;;
+	remove)  cmd_remove ;;
+	unit)    cmd_unit_install ;;
+	status)  cmd_status ;;
+	-h|--help|help)
+		cat <<'EOF'
+waveline-kmod -- carry Waveline's patched snd-usb-audio without DKMS.
+
+  sudo waveline-kmod status                    what is built and what is loaded
+  sudo waveline-kmod install [--no-load] <ko>  stage, sign, install the boot unit
+  sudo waveline-kmod load                      swap the patched module in
+  sudo waveline-kmod unload                    put the stock module back
+  sudo waveline-kmod rebuild                   rebuild after a kernel update
+  sudo waveline-kmod remove                    remove the module and the unit
+
+The module lives in /var/lib/waveline/modules/<kernel release>, because on an
+image-based distribution /usr is read-only and DKMS has nowhere to write. It is
+keyed by kernel release: after a kernel update the stock in-tree driver is used
+until you rebuild, which is the correct failure mode.
+
+See ATOMIC-SUPPORT.md.
+EOF
+		;;
+	*) die "unknown command: $1 (try --help)" ;;
+esac

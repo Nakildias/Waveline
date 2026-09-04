@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+# Waveline mixer daemon.
+#
+# Owns the PipeWire graph (channels, stream/monitor mixes, software monitor),
+# the noise filter and -- on a microphone that has any -- its vendor hardware
+# controls, and exposes all of it on the session bus as org.waveline.Mixer. The
+# GUI is only a client, so closing the window leaves routing and noise
+# suppression running.
+#
+# Which microphone it is branded for, and whether it opens a vendor USB device
+# at all, comes from ~/.config/waveline/profile.conf, written by install.sh.
+#
+#   systemctl --user enable --now wavelined
+#   journalctl --user -u wavelined -f
+#
+# Optional. Nothing else in this repository depends on it, and the microphone
+# works without it -- this is the mixer, not the fixes.
+
+[Unit]
+Description=Waveline mixer daemon
+Documentation=https://github.com/Nakildias/Waveline
+After=pipewire.service wireplumber.service
+Requires=pipewire.service
+# The graph is rebuilt from scratch on every start, so a restart loop caused by
+# a missing PipeWire is harmless -- but do not let it spin fast.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/wavelined
+Restart=on-failure
+RestartSec=5
+
+# The graph needs ~1100 descriptors (one PipeWire connection per filter and per
+# loopback path). systemd's user manager defaults the *soft* limit to 1024, and
+# hitting it makes module-loopback fail to load: channel paths disappear
+# mid-rewire with nothing logged. The daemon also raises this itself, so an
+# older unit file is not fatal -- but keep the two in step.
+LimitNOFILE=524288
+
+# Real-time scheduling for the audio threads.
+#
+# Every filter node in the graph is its own PipeWire context with its own data
+# loop, so a full graph has ~100 threads with a hard deadline -- 2.66 ms of it
+# at the mixer's Ultra Low Latency setting. Ordinary SCHED_OTHER threads miss
+# that deadline the moment the machine is busy, and it is heard as clicks.
+#
+# With RLIMIT_RTPRIO above zero, PipeWire's module-rt sets the scheduling policy
+# itself. With it at zero -- the default everywhere -- it has to ask rtkit
+# instead, and rtkit stops at 25 real-time threads per user, so three quarters
+# of the graph stays SCHED_OTHER. See app/src/engine/rtsched.h.
+#
+# The *hard* limit these are raised against is set by install.sh, on the user
+# manager, because a user unit cannot grant itself more than its manager has.
+# Without that step these two lines are not an error: systemd lowers a request
+# it cannot satisfy to the current hard limit rather than failing the unit, so
+# the daemon still starts and still runs -- just on rtkit's terms.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+
+# Needs the session bus, PipeWire's socket, the microphone's usbfs node (when it
+# has vendor controls), and its own
+# config directory. ProtectHome=read-only without the ReadWritePaths below
+# blocks the config write *silently*: the daemon runs fine and simply never
+# persists anything.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ~/.config/wireplumber is for the output-headroom drop-in the mixer writes.
+# Leaving it out does not fail anything visibly: the daemon runs, the setting
+# saves, and the rule silently never reaches WirePlumber.
+ReadWritePaths=%h/.config/waveline %h/.config/alsa %h/.config/wireplumber
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+DeviceAllow=/dev/bus/usb rw
+DeviceAllow=char-alsa rw
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+"""waveline-hw -- control a microphone's hardware features from Linux.
+
+One-shot: opens the device, does one read-modify-write, exits. No daemon, no
+resident process, no polling. See docs/protocol.md for why that matters on a
+device whose failure mode is refusing control transfers under load.
+
+Only microphones with controls ALSA cannot reach need this at all. On the
+Elgato Wave:3 that is Clipguard and the direct monitor mix; gain, mute and
+headphone volume are ordinary ALSA controls and this tool deliberately does not
+duplicate them. An ordinary microphone has no such block, and waveline-hw says
+so and exits rather than pretending otherwise -- the mixer itself works fine
+without it.
+
+  waveline-hw --status
+  waveline-hw --clipguard on
+  waveline-hw --dump
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+
+def _load_backend():
+    """Import the vendor transport for whichever microphone is installed.
+
+    One module per device, named waveline_<profile>.py beside this script, so a
+    new microphone is a new file and no edit here. The installed profile is
+    tried first; failing that, every backend is asked whether its device is on
+    the bus, which is what makes the tool work from a git checkout that was
+    never installed.
+    """
+    import importlib
+
+    here = os.path.dirname(os.path.realpath(__file__))
+    tried = []
+
+    def attempt(name):
+        try:
+            mod = importlib.import_module("waveline_" + name)
+        except ImportError:
+            return None
+        tried.append(name)
+        return mod
+
+    conf = os.path.expanduser("~/.config/waveline/profile.conf")
+    if os.path.exists(conf):
+        try:
+            with open(conf) as fh:
+                for line in fh:
+                    key, _, val = line.partition("=")
+                    if key.strip() == "PROFILE_ID":
+                        mod = attempt(val.strip().strip('"').strip("'"))
+                        if mod is not None:
+                            return mod
+                        break
+        except OSError:
+            pass
+
+    # No usable profile: fall back to whichever backend can find its device.
+    # find_device() raises when its device is absent -- that is the normal
+    # answer here and means "not this one", not a failure worth reporting.
+    for path in sorted(os.listdir(here)):
+        if not path.startswith("waveline_") or not path.endswith(".py"):
+            continue
+        mod = attempt(path[len("waveline_"):-len(".py")])
+        if mod is None:
+            continue
+        try:
+            if mod.find_device():
+                return mod
+        except Exception:
+            continue
+
+    sys.exit(
+        "waveline-hw: no microphone with vendor controls found"
+        + (f" (backends tried: {', '.join(tried)})" if tried else "")
+        + "\n  Ordinary microphones have none -- there is nothing for this tool"
+        "\n  to do, and the mixer does not need it."
+    )
+
+
+w3 = _load_backend()  # noqa: E402
+
+VERSION = "1.0"
+
+GREEN, YELLOW, RED, BOLD, DIM, OFF = (
+    ("\033[32m", "\033[33m", "\033[31m", "\033[1m", "\033[2m", "\033[0m")
+    if sys.stdout.isatty() else ("", "", "", "", "", "")
+)
+
+
+def onoff(value):
+    return f"{GREEN}on{OFF}" if value else f"{DIM}off{OFF}"
+
+
+def parse_bool(text):
+    t = text.strip().lower()
+    if t in ("on", "true", "1", "yes", "enable", "enabled"):
+        return True
+    if t in ("off", "false", "0", "no", "disable", "disabled"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"expected on or off, got {text!r}"
+    )
+
+
+# "on" means an equal blend of your voice and the PC, which is what the centre
+# LED does on the dial. "off" means all PC audio -- you stop hearing yourself.
+MONITOR_ON_PCT = 50
+
+
+def parse_monitor(text):
+    t = text.strip().lower().rstrip("%")
+    if t in ("on", "true", "yes", "enable", "enabled"):
+        return MONITOR_ON_PCT
+    if t in ("off", "false", "no", "disable", "disabled"):
+        return 0
+    if t in ("mic", "me", "self"):
+        return 100
+    if t in ("pc", "computer"):
+        return 0
+    try:
+        pct = int(t)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected on, off, or 0-100, got {text!r}"
+        ) from None
+    if not 0 <= pct <= 100:
+        raise argparse.ArgumentTypeError(
+            f"monitor mix must be 0-100 (percent of your own voice), got {pct}"
+        )
+    return pct
+
+
+def card_name():
+    for name in sorted(os.listdir("/proc/asound")):
+        try:
+            with open(f"/proc/asound/{name}/usbid") as f:
+                if f.read().strip() == f"{w3.VID:04x}:{w3.PID:04x}":
+                    return name
+        except OSError:
+            continue
+    return None
+
+
+def profile():
+    """Active PipeWire profile of the Wave:3 card, or None.
+
+    Matched by name: a machine may have several Elgato devices, and the first
+    Elgato card in pactl's output is not necessarily this one.
+    """
+    try:
+        out = subprocess.run(["pactl", "list", "cards"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for block in out.split("Card #"):
+        if "Wave_3" not in block and "Wave:3" not in block:
+            continue
+        for line in block.splitlines():
+            if "Active Profile:" in line:
+                return line.split(":", 1)[1].strip()
+    return None
+
+
+def alsa_mixer(card):
+    """Read the ALSA-owned controls, so status can show the whole picture."""
+    if not card:
+        return {}
+    out = {}
+    try:
+        text = subprocess.run(["amixer", "-c", card.replace("card", ""),
+                               "contents"], capture_output=True, text=True,
+                              timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    name = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("numid="):
+            for part in line.split(","):
+                if part.startswith("name="):
+                    name = part[5:].strip("'")
+        elif line.startswith(": values=") and name:
+            out[name] = line.split("=", 1)[1].split(",")[0].strip()
+    return out
+
+
+def cmd_status(dev, args):
+    cfg = dev.read_config()
+    d = w3.decode_config(cfg)
+    card = card_name()
+    prof = profile()
+    mixer = alsa_mixer(card)
+
+    try:
+        info = dev.read_info()
+        fw, api = info["firmware_version"], info["api_version"]
+    except w3.Wave3Error:
+        fw = api = "?"
+
+    print(f"{BOLD}Elgato Wave:3{OFF}  "
+          f"({w3.VID:04x}:{w3.PID:04x}, firmware {fw}, api {api})")
+    print(f"  device      {dev.path}"
+          + (f", ALSA {card}" if card else ""))
+    if prof:
+        print(f"  profile     {prof}")
+    print()
+
+    print(f"{BOLD}Hardware features{OFF}  (this tool)")
+    print(f"  clipguard   {onoff(d['clipguard'])}")
+    pct = d["monitor_pct"]
+    if pct == 0:
+        blend = "all PC audio, you cannot hear yourself"
+    elif pct == 100:
+        blend = "all microphone, no PC audio"
+    else:
+        blend = f"{pct}% you / {100 - pct}% PC"
+    print(f"  monitor     {pct}%   {DIM}({blend}){OFF}")
+    print()
+
+    print(f"{BOLD}Standard controls{OFF}  {DIM}(owned by ALSA/PipeWire,"
+          f" shown for reference){OFF}")
+    mic_sw = mixer.get("Mic Capture Switch")
+    pcm_sw = mixer.get("PCM Playback Switch")
+    print(f"  mic         {'MUTED' if d['mic_mute'] else 'live'}"
+          + (f"   (ALSA switch: {mic_sw})" if mic_sw else ""))
+    print(f"  mic gain    {d['dial_value'] / 256.0:+.1f} dB"
+          + (f"   (ALSA: {mixer['Mic Capture Volume']}/80)"
+             if "Mic Capture Volume" in mixer else ""))
+    # From feature unit 5, not config offset 8: offset 8 is whole dB and would
+    # report -26 where the true value is -25.5.
+    try:
+        hp_db = int.from_bytes(uac_get(dev, w3.FU_HP, w3.UAC_VOLUME, 2),
+                               "little", signed=True) / 256.0
+        hp_txt = f"{hp_db:+.1f} dB"
+    except w3.Wave3Error:
+        hp_txt = f"{d['hp_volume_db']:+d} dB"
+    print(f"  headphone   {'MUTED' if d['hp_mute'] else 'on'}   {hp_txt}"
+          + (f"   (ALSA switch: {pcm_sw})" if pcm_sw else ""))
+    print(f"  dial mode   {d['dial_mode']} ({d['dial_mode_name']})")
+    print()
+
+    # wValue=0x0001 is not a level meter: the 8 bytes are one value repeated
+    # and it tracks neither input nor playback (docs/protocol.md). Shown only
+    # in --dump, where raw bytes are the point.
+
+    # The single most common cause of "my LED does not respond".
+    if prof == "pro-audio":
+        print(f"{YELLOW}note{OFF} the card is in the pro-audio profile, which does"
+              " not expose hardware")
+        print("     volume/mute to PipeWire. Desktop volume and mute changes will"
+              " not")
+        print("     reach the device, so the LED ring will not follow them. This"
+              " is by")
+        print("     design in that profile -- see docs/profiles.md for the"
+              " tradeoffs.")
+    return 0
+
+
+def cmd_clipguard(dev, args):
+    want = args.clipguard
+    before, after = dev.set_byte(w3.CFG_CLIPGUARD, 1 if want else 0)
+    was = bool(before[w3.CFG_CLIPGUARD])
+    if after is None:
+        print(f"clipguard already {onoff(want)}")
+        return 0
+    got = bool(dev.read_config()[w3.CFG_CLIPGUARD])
+    if got != want:
+        print(f"{RED}failed{OFF}: wrote {int(want)} but device reports"
+              f" {int(got)}", file=sys.stderr)
+        return 1
+    print(f"clipguard {onoff(was)} -> {onoff(got)}")
+    return 0
+
+
+def cmd_monitor(dev, args):
+    pct = args.monitor
+    raw = w3.pct_to_mix(pct)
+    before, after = dev.set_byte(w3.CFG_MONITOR_MIX, raw)
+    was = w3.mix_to_pct(before[w3.CFG_MONITOR_MIX])
+    if after is None:
+        # Report the byte-derived percentage, not the requested one. The two can
+        # differ by a point because 101 percentages do not map onto 92 byte
+        # values, and saying "already 50%" here while --status says 51% for the
+        # identical state would just look like a bug.
+        print(f"monitor mix already {was}% {DIM}(byte {raw}){OFF}")
+        return 0
+    got_raw = dev.read_config()[w3.CFG_MONITOR_MIX]
+    if got_raw != raw:
+        print(f"{RED}failed{OFF}: wrote {raw} but device reports {got_raw}",
+              file=sys.stderr)
+        return 1
+    print(f"monitor mix {was}% -> {w3.mix_to_pct(got_raw)}% "
+          f"{DIM}(byte {raw}){OFF}")
+    if pct == 0:
+        print(f"  {DIM}you will no longer hear yourself in the mic's"
+              f" headphone jack{OFF}")
+    return 0
+
+
+def uac_get(dev, entity, selector, length):
+    """Read a UAC feature unit through the vendor interface."""
+    import ctypes
+    buf = ctypes.create_string_buffer(length)
+    n = dev._xfer(w3.BM_CLASS_IN, w3.UAC_GET_CUR, selector << 8,
+                  (entity << 8) | w3.IFACE, buf)
+    return bytes(buf.raw[:n])
+
+
+def hw_state(dev):
+    """What the hardware currently is, as ALSA control values.
+
+    Two control transfers. The config block carries mute states and headphone
+    volume; mic gain is read from feature unit 6 instead of config offsets 0/1,
+    because those hold "the dial value in the active mode" and so mean different
+    things depending on which mode the dial is in.
+    """
+    cfg = dev.read_config()
+    gain_raw = int.from_bytes(uac_get(dev, w3.FU_MIC, w3.UAC_VOLUME, 2),
+                              "little", signed=True)
+    hp_raw = int.from_bytes(uac_get(dev, w3.FU_HP, w3.UAC_VOLUME, 2),
+                            "little", signed=True)
+    return {
+        # ALSA booleans are "capture/playback enabled", the inverse of muted.
+        "Mic Capture Switch": "off" if cfg[w3.CFG_MIC_MUTE] else "on",
+        "PCM Playback Switch": "off" if cfg[w3.CFG_HP_MUTE] else "on",
+        # ALSA steps are 0.5 dB (0-80 = 0-40 dB); the dial reports 1/256 dB.
+        #
+        # Round rather than truncate, for accuracy. Truncating always snaps the
+        # gain downward, by up to 0.43 dB at the worst detent; rounding centres
+        # the error and halves it to 0.21 dB.
+        #
+        # It does NOT make the percentage steps even, and nothing can. The gain
+        # dial has 7 LEDs at two detents each: 14 clicks across 80 ALSA steps is
+        # 5.71 steps per click, and ALSA only has integers. So four of the 14
+        # clicks move 5 steps (6.25%) and the rest move 6 (7.5%), whichever way
+        # you quantise. An even 7.14% per click would need ALSA's range to be a
+        # multiple of 14, and it is fixed at 0-80 by the device's own UAC
+        # descriptors.
+        #
+        # Still stable: writing v sets the hardware to exactly v*128, so the
+        # next poll rounds to the same v and stops. No oscillation.
+        "Mic Capture Volume": str(int(round(gain_raw / 128.0))),
+        # Read from feature unit 5, NOT config offset 8. Offset 8 stores whole
+        # dB while ALSA's step is 0.5 dB, so using it rounds every half-dB
+        # setting down and the sync then "corrects" perfectly good values by one
+        # step -- including ones the user just set from Linux. FU 5 reports the
+        # true value in 1/256 dB. ALSA 0 is -60 dB, hence the +120 offset.
+        "PCM Playback Volume": str(int(round(hp_raw / 128.0)) + 120),
+    }
+
+
+def cmd_watch(dev, args):
+    import time
+
+    # Long-running, and its output is the only visibility into what it does.
+    # Without this stdout is block-buffered whenever it is not a terminal, so
+    # under systemd the journal stays empty until the buffer happens to fill.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    card = card_name()
+    if not card:
+        print(f"{RED}error{OFF}: no Wave:3 ALSA card", file=sys.stderr)
+        return 1
+    idx = card.replace("card", "")
+
+    print(f"watching {dev.path} every {args.interval:.2f}s"
+          + ("  (dry run, nothing will be changed)" if args.dry_run else ""))
+    print("physical dial and mute-pad changes will be pushed into ALSA, so"
+          " PipeWire sees them")
+    print("Ctrl-C to stop")
+
+    # Hold interface 3 only while actually reading. Keeping it claimed for the
+    # whole run would make every other `waveline-hw` invocation fail with EBUSY for as
+    # long as this service is enabled -- which is essentially always.
+    dev.release()
+
+    prev_cfg = None
+    while True:
+        try:
+            dev.claim()
+        except w3.Wave3Busy:
+            # Another waveline-hw is mid-command. Its turn; try again next tick.
+            time.sleep(args.interval)
+            continue
+        except w3.Wave3Error as e:
+            print(f"{RED}device went away{OFF}: {e}", file=sys.stderr)
+            return 1
+
+        try:
+            cfg = dev.read_config()
+        except w3.Wave3Error as e:
+            dev.release()
+            print(f"{RED}device went away{OFF}: {e}", file=sys.stderr)
+            return 1
+
+        # Steady state costs exactly one control transfer per interval: if the
+        # device has not changed, there is nothing to reconcile and we never
+        # touch ALSA or spawn anything.
+        if cfg == prev_cfg:
+            dev.release()
+            time.sleep(args.interval)
+            continue
+        prev_cfg = cfg
+
+        try:
+            want = hw_state(dev)
+        except w3.Wave3Error as e:
+            dev.release()
+            print(f"{RED}read failed{OFF}: {e}", file=sys.stderr)
+            return 1
+        finally:
+            # Done with USB for this tick; the amixer work below does not need
+            # the interface, and holding it there would block other commands.
+            dev.release()
+        have = alsa_mixer(card)
+
+        for ctl, value in want.items():
+            if have.get(ctl) == value:
+                continue
+            stamp = time.strftime("%H:%M:%S")
+            if args.dry_run:
+                print(f"  {stamp}  {ctl}: hardware={value} alsa={have.get(ctl)}"
+                      f"   {DIM}(would sync){OFF}")
+                continue
+            r = subprocess.run(
+                ["amixer", "-c", idx, "-q", "cset", f"name={ctl}", value],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                print(f"  {stamp}  {ctl}: {have.get(ctl)} -> {value}")
+            else:
+                print(f"  {stamp}  {RED}failed{OFF} to set {ctl}: "
+                      f"{r.stderr.strip()}", file=sys.stderr)
+
+        time.sleep(args.interval)
+
+
+def cmd_dump(dev, args):
+    cfg = dev.read_config()
+    print(f"config  {w3.hexdump(cfg)}")
+    print(w3.annotate(cfg))
+    try:
+        inp, play = dev.read_meter()
+        print(f"meter   input={inp} playback={play}")
+    except w3.Wave3Error as e:
+        print(f"meter   unavailable: {e}")
+    try:
+        info = dev.read_info()
+        print(f"info    firmware={info['firmware_version']}"
+              f" api={info['api_version']}")
+    except w3.Wave3Error as e:
+        print(f"info    unavailable: {e}")
+    print()
+    print("Paste this into a bug report. It contains no serial number.")
+    return 0
+
+
+EPILOG = f"""
+examples:
+  waveline-hw --status                 show everything the device reports
+  waveline-hw --clipguard on           enable Clipguard (hardware anti-clip)
+  waveline-hw --monitor on             hear yourself, blended 50/50 with PC audio
+  waveline-hw --monitor off            stop hearing yourself; all PC audio
+  waveline-hw --monitor 75             75% your voice, 25% PC audio
+  waveline-hw --dump                   raw config bytes, for bug reports
+  waveline-hw --watch                  keep Linux in sync with the physical controls
+
+about --watch:
+  The Wave:3 never tells the kernel when you change something ON the microphone
+  -- tapping the mute pad or turning the dial sends no USB status message, so
+  ALSA keeps serving its cached values and your desktop shows the old state.
+  Linux -> device works fine; it is only device -> Linux that is blind.
+
+  --watch closes that gap by polling the device and writing what changed into
+  the ALSA control, which updates the cache and notifies PipeWire. Costs one
+  16-byte control transfer per interval when nothing is happening.
+
+  Turning the gain dial snaps it to the nearest 0.5 dB, because that is ALSA's
+  step size. The shift is inaudible and it settles immediately.
+
+about --monitor:
+  This is the microphone's own hardware monitor mix -- your voice blended with
+  the PC's playback and sent to the headphone jack ON THE MIC. It is the same
+  thing the dial does in monitor-mix mode, and it does nothing for headphones
+  plugged into your computer instead of the microphone.
+
+  0 = all PC audio (you cannot hear yourself), 100 = all microphone (no PC
+  audio). The scale matches the dial's own range, verified against it.
+
+what this tool deliberately does not do:
+  mic gain/mute and headphone volume/mute are exposed by ALSA, so your volume
+  UI and `amixer -c <card>` already control them, and the LED ring already
+  follows -- provided the card is not in the pro-audio profile. Duplicating
+  them here would add a second source of truth for no gain.
+
+  LED brightness and ring colour are not implemented: testing on firmware
+  0.3.7 showed brightness has no effect on this model, and the ring is a fixed
+  white level bar that turns red for mute, not an RGB ring. See
+  docs/protocol.md.
+
+requires:
+  /etc/udev/rules.d/60-waveline-wave3.rules, for access to the device without
+  root. {BOLD}waveline-hw --status{OFF} will tell you if it is missing.
+"""
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="waveline-hw",
+        description="Control Elgato Wave:3 hardware features on Linux.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--status", action="store_true",
+                   help="show device state (default if no option is given)")
+    p.add_argument("--clipguard", type=parse_bool, metavar="on|off",
+                   help="enable or disable Clipguard")
+    p.add_argument("--monitor", type=parse_monitor, metavar="on|off|0-100",
+                   help="direct monitor mix: percent of your own voice in the "
+                        "mic's headphone jack (0 = all PC, 100 = all mic, "
+                        f"on = {MONITOR_ON_PCT}%%)")
+    p.add_argument("--dump", action="store_true",
+                   help="raw config block, annotated, for bug reports")
+    p.add_argument("--watch", action="store_true",
+                   help="run until stopped, pushing physical dial and mute-pad "
+                        "changes into ALSA so PipeWire and your desktop see them")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --watch: report what would be synced, change nothing")
+    p.add_argument("--interval", type=float, default=0.25, metavar="SECONDS",
+                   help="with --watch: poll interval (default 0.25)")
+    p.add_argument("--version", action="version",
+                   version=f"waveline-hw {VERSION}")
+    return p
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # Exactly one action; --status is the default.
+    actions = []
+    if args.clipguard is not None:
+        actions.append(cmd_clipguard)
+    if args.monitor is not None:
+        actions.append(cmd_monitor)
+    if args.dump:
+        actions.append(cmd_dump)
+    if args.watch:
+        actions.append(cmd_watch)
+    if args.status:
+        actions.append(cmd_status)
+    if not actions:
+        actions = [cmd_status]
+    if len(actions) > 1:
+        parser.error("give one action at a time")
+    if args.interval <= 0:
+        parser.error("--interval must be positive")
+    if (args.dry_run or args.interval != 0.25) and not args.watch:
+        parser.error("--dry-run and --interval only apply to --watch")
+
+    try:
+        dev = w3.Wave3()
+    except w3.Wave3Error as e:
+        print(f"{RED}error{OFF}: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        with dev:
+            return actions[0](dev, args)
+    except w3.Wave3Error as e:
+        print(f"{RED}error{OFF}: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

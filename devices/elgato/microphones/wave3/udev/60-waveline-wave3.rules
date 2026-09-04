@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+# Elgato Wave:3 (0fd9:0070) -- userspace access to the vendor control interface.
+#
+# The Wave:3 exposes an unclaimed vendor-specific interface 3 (0xFF/0xF0, zero
+# endpoints). Hardware controls that ALSA does not expose -- Clipguard, direct
+# monitor mix, the mute-ring LED -- are reached by endpoint-0 control transfers
+# addressed to that interface. See docs/protocol.md.
+#
+# Those transfers go through USBDEVFS_CONTROL on /dev/bus/usb/<bus>/<dev>,
+# which requires the node to be opened O_RDWR. By default it is root-only for
+# writing (crw-rw-r-- root root), so the waveline-hw tool cannot work without this
+# rule.
+#
+# This grants access two ways, deliberately:
+#
+#   TAG+="uaccess"   the logged-in user gets an ACL from systemd-logind. This
+#                    is the modern path and needs no group membership.
+#   GROUP="audio"    fallback for headless/multi-seat setups where there is no
+#                    logind session to attach an ACL to.
+#
+# Nothing here touches the audio interfaces (0, 1, 2). snd-usb-audio keeps
+# them, and this rule does not detach or rebind anything.
+#
+# Installs to /etc/udev/rules.d/60-waveline-wave3.rules -- after the distro's
+# own USB rules (50-*) so the mode and group here win.
+#
+#   sudo install -Dm644 devices/wave3/udev/60-waveline-wave3.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=usb \
+#        --attr-match=idVendor=0fd9 --attr-match=idProduct=0070
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0660", GROUP="audio", TAG+="uaccess"
+
+# PID 0071 is the DFU/bootloader identity. The device re-enumerates as 0071 if
+# its firmware update mode is entered -- matched here only so the node does not
+# silently become root-only mid-recovery. Nothing in this repo writes to the
+# DFU interface; see the safety rules in docs/protocol.md.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0071", MODE="0660", GROUP="audio", TAG+="uaccess"

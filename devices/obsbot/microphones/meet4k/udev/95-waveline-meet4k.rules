@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
+# OBSBOT Meet 4K (3564:fef3) -- lift the capture preamp off its power-on value.
+#
+# The microphone's only gain control is a USB feature unit, which ALSA exposes
+# as a single mixer element:
+#
+#   numid=2  'OBSBOT Meet 4K Microphone Capture Volume'
+#     range 0..9216, dB range 18.00 .. 54.00  (256 raw units per dB)
+#
+# It powers on at 2304 -- 27 dB of an available 54 dB, with 27 dB left unused.
+# That, and nothing else, is why this microphone is quiet.
+#
+# No part of a normal desktop stack corrects it, because nothing else can reach
+# the element:
+#
+#   - PipeWire does not map it. ACP leaves it out of the analog-input route, so
+#     the source advertises "100% / 0.00 dB" while the raw value sits at 2304.
+#     Verified: `wpctl set-volume <id> 0.5` leaves amixer reading 2304.
+#   - WirePlumber's saved route volume is therefore also fiction -- the
+#     channelVolumes it restores are applied to a control the preamp ignores.
+#   - Waveline's own input level cannot help. It is a software gain clamped to
+#     unity (SetMasterMicInputVolume in app/src/daemon/mixerservice.cpp), so it
+#     attenuates and never boosts, by deliberate design.
+#
+# So the element has to be written directly. That is all this rule does.
+#
+# 9216 = 54 dB: the top of the range, +27 dB over the power-on value. The
+# capsule and preamp in this webcam are clean enough to use all of it, and the
+# alternative was worse -- at 27 dB the microphone only reached a usable level
+# with the Creative FX overdrive switched on, which is a waveshaper, so the
+# loudness was being bought with harmonic distortion. Real preamp gain is
+# louder *and* cleaner than that, and should put overdrive back to being an
+# effect rather than a level control.
+#
+# The trade is headroom: there is none above this, so genuinely loud close
+# speech can clip at the converter, before any Waveline stage can catch it. If
+# that turns up, come down in 3 dB steps -- 51 dB, then 48 dB:
+#
+#   amixer -c O4K sset 'OBSBOT Meet 4K Microphone' 51dB
+#
+# and edit the value below to keep whatever lands. Measured gain is close to
+# but not exactly linear (+17.7 dB observed over a nominal +23.4 dB span), so
+# trust the ear over the arithmetic.
+#
+# The number in the filename matters, and is why this rule is 95- where every
+# other Waveline udev rule is 60-. /usr/lib/udev/rules.d/90-alsa-restore.rules
+# runs `alsactl restore` on every controlC* add. Numbered below 90, this rule
+# would set the gain and then watch alsa-restore put the saved -- quiet --
+# value straight back over it.
+#
+# Matching controlC* rather than card* is also deliberate: the control device
+# appearing is what guarantees the mixer element exists by the time amixer
+# runs. $attr{device/number} on that device is the card index.
+#
+#   sudo install -Dm644 \
+#     devices/obsbot/microphones/meet4k/udev/95-waveline-meet4k.rules \
+#     /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --action=add /sys/class/sound/controlC<N>
+
+ACTION=="add", SUBSYSTEM=="sound", KERNEL=="controlC*", ATTRS{idVendor}=="3564", ATTRS{idProduct}=="fef3", RUN+="/usr/bin/amixer -c $attr{device/number} -q sset 'OBSBOT Meet 4K Microphone' 9216"
