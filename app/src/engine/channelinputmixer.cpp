@@ -4,6 +4,7 @@
 #include "channelinputmixer.h"
 
 #include "dspprobe.h"
+#include "filterhost.h"
 #include "rtsched.h"
 
 #include <pipewire/pipewire.h>
@@ -17,6 +18,7 @@ namespace waveline {
 struct ChannelInputMixer::Impl {
     pw_thread_loop *loop = nullptr;
     pw_filter *filter = nullptr;
+    spa_hook listener{};
     DspMeter meter;
     void *inFl = nullptr;
     void *inFr = nullptr;
@@ -72,9 +74,11 @@ bool ChannelInputMixer::start(const std::string &nodeName,
                               const std::string &description, std::string &error) {
     d_->meter.attach(nodeName, "Channel input mix");
 
-    d_->loop = pw_thread_loop_new("waveline-ch-mix", nullptr);
+    // The shared DSP connection, not one of this filter's own. See filterhost.h.
+    if (!FilterHost::start(error)) return false;
+    d_->loop = FilterHost::loop();
     if (!d_->loop) {
-        error = "pw_thread_loop_new failed";
+        error = "shared filter connection unavailable";
         return false;
     }
 
@@ -94,9 +98,9 @@ bool ChannelInputMixer::start(const std::string &nodeName,
         "node.want-driver", "true",
         nullptr);
 
-    d_->filter = pw_filter_new_simple(pw_thread_loop_get_loop(d_->loop),
-                                      nodeName.c_str(), applyRealtimeProps(props), &kFilterEvents,
-                                      d_.get());
+    d_->filter = pw_filter_new(FilterHost::core(), nodeName.c_str(), applyRealtimeProps(props));
+    if (d_->filter)
+        pw_filter_add_listener(d_->filter, &d_->listener, &kFilterEvents, d_.get());
     if (!d_->filter) {
         error = "pw_filter_new_simple failed";
         pw_thread_loop_unlock(d_->loop);
@@ -138,10 +142,6 @@ bool ChannelInputMixer::start(const std::string &nodeName,
 
     pw_thread_loop_unlock(d_->loop);
 
-    if (pw_thread_loop_start(d_->loop) < 0) {
-        error = "pw_thread_loop_start failed";
-        return false;
-    }
     return true;
 }
 
@@ -160,8 +160,8 @@ void ChannelInputMixer::stop() {
         d_->filter = nullptr;
     }
     pw_thread_loop_unlock(d_->loop);
-    pw_thread_loop_stop(d_->loop);
-    pw_thread_loop_destroy(d_->loop);
+    // The loop and the connection are shared and outlive this filter; only the
+    // node on them is ours to destroy. See filterhost.h.
     d_->loop = nullptr;
     // After the loop is gone, so nothing can still be inside the counters.
     d_->meter.detach();

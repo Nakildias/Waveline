@@ -7,6 +7,8 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QFrame>
@@ -15,6 +17,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QPushButton>
 #include <QPainter>
 #include <QScreen>
@@ -209,6 +212,19 @@ bool loadFadersLinked(const QString &cardKey) {
     const bool on = s.value(cardKey, false).toBool();
     s.endGroup();
     return on;
+}
+
+QStringList loadChannelOrderSetting() {
+    QSettings s;
+    return s.value(QStringLiteral("channelOrder")).toStringList();
+}
+
+void saveChannelOrderSetting(const QStringList &order) {
+    QSettings s;
+    if (order.isEmpty())
+        s.remove(QStringLiteral("channelOrder"));
+    else
+        s.setValue(QStringLiteral("channelOrder"), order);
 }
 
 void saveFadersLinked(const QString &cardKey, bool on) {
@@ -625,6 +641,12 @@ QWidget *MainWindow::buildInputs() {
     wellLay->setContentsMargins(10, 10, 10, 10);
 
     auto *host = new QWidget(well);
+    stripHost_ = host;
+    loadChannelOrder();
+    // Cards are reordered by dragging their link button; the row they land in
+    // is this widget. See handleStripDrag().
+    host->setAcceptDrops(true);
+    host->installEventFilter(this);
     stripRow_ = new QHBoxLayout(host);
     stripRow_->setContentsMargins(0, 0, 0, 0);
     stripRow_->setSpacing(8);
@@ -1959,10 +1981,124 @@ void MainWindow::applyMasterMonitorState(const QString &masterId) {
                         "metered here."));
 }
 
+void MainWindow::loadChannelOrder() {
+    channelOrder_ = loadChannelOrderSetting();
+}
+
+QList<ChannelInfo> MainWindow::orderedChannels() const {
+    const QList<ChannelInfo> channels = client_->channels();
+    if (channelOrder_.isEmpty()) return channels;
+
+    QList<ChannelInfo> out;
+    out.reserve(channels.size());
+    // Remembered ones first, in the remembered order.
+    for (const QString &id : channelOrder_) {
+        for (const ChannelInfo &c : channels) {
+            if (c.id == id) {
+                out.append(c);
+                break;
+            }
+        }
+    }
+    // Then anything the user has never moved, still in the daemon's order, so
+    // a channel created just now turns up where it would have without any of
+    // this.
+    for (const ChannelInfo &c : channels) {
+        if (!channelOrder_.contains(c.id)) out.append(c);
+    }
+    return out;
+}
+
+void MainWindow::saveChannelOrderFromRow() {
+    if (!stripRow_) return;
+    // Read back from the row rather than from a model of it: the live drag
+    // moves the widgets, so the widgets are the truth by the time this runs.
+    QStringList order;
+    for (int i = 0; i < stripRow_->count(); ++i) {
+        QWidget *w = stripRow_->itemAt(i)->widget();
+        if (!w) continue;
+        auto *strip = qobject_cast<ChannelStrip *>(w);
+        if (!strip) continue;
+        const QString id = strip->channelId();
+        if (strips_.contains(id)) order << id;
+    }
+    // Ids that belong to channels the daemon is not reporting right now are
+    // kept, at the back: an application that is closed should still come back
+    // where it was put.
+    for (const QString &id : channelOrder_) {
+        if (!order.contains(id)) order << id;
+    }
+    channelOrder_ = order;
+    saveChannelOrderSetting(order);
+}
+
+int MainWindow::channelDropIndex(const QPoint &hostPos) const {
+    // The gap the cursor is nearest, expressed as a layout index. Each card
+    // claims the half of itself nearest the gap in question, which is what
+    // makes the card under the cursor swap rather than refuse to move.
+    int index = -1;
+    for (int i = 0; i < stripRow_->count(); ++i) {
+        auto *strip = qobject_cast<ChannelStrip *>(stripRow_->itemAt(i)->widget());
+        if (!strip || !strips_.contains(strip->channelId())) continue;
+        if (hostPos.x() < strip->geometry().center().x()) return i;
+        index = i + 1;
+    }
+    // Past the centre of every card: the gap after the last one.
+    return index;
+}
+
+bool MainWindow::handleStripDrag(QEvent *event) {
+    switch (event->type()) {
+    case QEvent::DragEnter:
+    case QEvent::DragMove: {
+        auto *de = static_cast<QDragMoveEvent *>(event);
+        if (!de->mimeData()->hasFormat(
+                QString::fromLatin1(ChannelStrip::dragMimeType())))
+            return false;
+        const QString id = QString::fromUtf8(de->mimeData()->data(
+            QString::fromLatin1(ChannelStrip::dragMimeType())));
+        ChannelStrip *strip = strips_.value(id);
+        if (!strip) return false;
+        de->setDropAction(Qt::MoveAction);
+        de->accept();
+
+        // Reorder as the cursor moves rather than only on drop: the row is
+        // its own preview, so there is no separate insertion marker to draw
+        // and no way for the two to disagree.
+        const int want = channelDropIndex(de->position().toPoint());
+        const int have = stripRow_->indexOf(strip);
+        if (want >= 0 && have >= 0 && want != have && want != have + 1) {
+            stripRow_->removeWidget(strip);
+            stripRow_->insertWidget(want > have ? want - 1 : want, strip);
+        }
+        return true;
+    }
+    case QEvent::Drop: {
+        auto *de = static_cast<QDropEvent *>(event);
+        if (!de->mimeData()->hasFormat(
+                QString::fromLatin1(ChannelStrip::dragMimeType())))
+            return false;
+        de->setDropAction(Qt::MoveAction);
+        de->accept();
+        // The row already shows the answer; all that is left is to keep it.
+        saveChannelOrderFromRow();
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (stripHost_ && watched == stripHost_ && handleStripDrag(event))
+        return true;
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::rebuildStrips() {
     rebuildMasterStrips();
 
-    const auto channels = client_->channels();
+    const auto channels = orderedChannels();
     if (strips_.size() == channels.size()) return;
 
     for (auto *s : strips_) { stripRow_->removeWidget(s); s->deleteLater(); }
@@ -1981,6 +2117,10 @@ void MainWindow::rebuildStrips() {
             connect(strip, &ChannelStrip::fadersLinkedChanged, this,
                     [cardKey](bool on) { saveFadersLinked(cardKey, on); });
         }
+        // Channel cards only. The masters are ordered by the daemon -- slot 1
+        // is the primary bus and the numbering means something -- so dragging
+        // one somewhere else would be a lie the next refresh undoes.
+        strip->enableDragHandle();
         strip->enableEditableTitle();
         connect(strip, &ChannelStrip::displayNameEdited, this,
                 [this, id = c.id](const QString &name) {

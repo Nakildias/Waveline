@@ -140,7 +140,9 @@ BUILDENV_KERNEL=0        # 1 once the image also carries kernel build support
 BUILDENV_READY=0
 BUILDENV_ERR=""
 BUILDENV_HOST_PATH=""    # PATH for host builds, when the caller needs a custom one
+BUILDENV_SNAPSHOT=""     # host package snapshot the image was pinned to, if any
 declare -a BUILDENV_MOUNTS=()
+declare -a BUILDENV_PRUNED=()   # superseded build images removed by buildenv_ready
 
 # Base image matching the host. The release matters more than anything else
 # here: a binary built against Fedora 42's Qt runs on Fedora 42's Qt, and a
@@ -165,14 +167,65 @@ buildenv_base_image() {
 	esac
 }
 
+# ------------------------------------------------- snapshot-pinned base repos
+#
+# `archlinux:base-devel` is rolling: it is whatever Arch shipped this week. A
+# rolling *host* would be fine, but SteamOS is not one -- it is a frozen Arch
+# snapshot, and by the time an image is a few months old the container is well
+# ahead of it. The binaries then need a glibc the Deck does not have and the
+# installer refuses to install them ("the build container is newer than this
+# system"), which is the whole of why a container build fails there.
+#
+# Valve serves the exact snapshot the running image was built from, from the
+# same mirror the Deck's own pacman uses, under versioned repository names
+# (core-3.7, extra-3.7, ...). Point the container at those and `pacman -Syuu`
+# walks the fresh image *back* to the host's package set: same glibc, same Qt,
+# same everything the mixer links against.
+STEAMOS_MIRROR='https://steamdeck-packages.steamos.cloud/archlinux-mirror/$repo/os/$arch'
+
+# The snapshot suffix the host is pinned to, read from its own pacman.conf so a
+# SteamOS release bump is picked up without editing anything here. Empty (and
+# non-zero) on every system that is not a snapshot-pinned Arch.
+buildenv_snapshot_suffix() {
+	[[ "$ATOMIC_KIND" == "steamos" ]] || return 1
+	local sfx
+	sfx="$(sed -n 's/^[[:space:]]*\[core-\([0-9][0-9.]*\)\][[:space:]]*$/\1/p' \
+	       /etc/pacman.conf 2>/dev/null | head -1)"
+	[[ -n "$sfx" ]] || return 1
+	printf '%s\n' "$sfx"
+}
+
+# Writes pacman.conf + mirrorlist for that snapshot into the build context.
+# Only core/extra/multilib: jupiter and holo are Valve's own packages, signed
+# by Valve's key, and nothing the mixer builds against lives in them.
+#
+# SigLevel = Never because the snapshot's packages predate the keyring the
+# fresh image ships and re-importing keys inside a throwaway build container
+# buys nothing: this is the same host, the same HTTPS mirror and the same
+# packages the Deck already installed and is running right now.
+buildenv_write_snapshot_repos() {
+	local dir="$1" sfx="$2" r
+	printf 'Server = %s\n' "$STEAMOS_MIRROR" > "$dir/mirrorlist"
+	{
+		printf '[options]\nArchitecture = auto\nSigLevel = Never\nParallelDownloads = 5\n'
+		for r in core extra multilib; do
+			printf '\n[%s-%s]\nInclude = /etc/pacman.d/mirrorlist\n' "$r" "$sfx"
+		done
+	} > "$dir/pacman.conf"
+}
+
 # Everything the mixer, waveline-hw and DeepFilterNet need to *build*. The
 # runtime side is a separate question -- see buildenv_bundle_libs.
 buildenv_packages() {
 	case "$ATOMIC_BASE" in
-	fedora) echo "gcc gcc-c++ make cmake pkgconf-pkg-config git curl xz tar findutils which python3 patchelf qt6-qtbase-devel qt6-qtsvg-devel qt6-qtwebsockets-devel pipewire-devel rnnoise-devel cargo rust elfutils-libelf-devel" ;;
-	arch)   echo "base-devel cmake pkgconf git curl xz tar python patchelf qt6-base qt6-svg qt6-websockets pipewire rnnoise rust" ;;
-	suse)   echo "gcc gcc-c++ make cmake pkg-config git curl xz tar python3 patchelf qt6-base-devel qt6-svg-devel qt6-websockets-devel pipewire-devel rnnoise-devel cargo rust" ;;
-	debian) echo "build-essential cmake pkg-config git curl xz-utils python3 patchelf qt6-base-dev libqt6svg6-dev libqt6websockets6-dev libpipewire-0.3-dev librnnoise-dev cargo" ;;
+	# fluidsynth is the odd one out: nothing compiles against it, it is
+	# dlopened at run time. It is in the image so that the library can be
+	# lifted out of it on a system whose read-only /usr does not carry one --
+	# see buildenv_fluidsynth_lib.
+	fedora) echo "gcc gcc-c++ make cmake pkgconf-pkg-config git curl xz tar findutils which python3 patchelf qt6-qtbase-devel qt6-qtsvg-devel qt6-qtwebsockets-devel pipewire-devel rnnoise-devel cargo rust elfutils-libelf-devel fluidsynth-libs" ;;
+	arch)   echo "base-devel cmake pkgconf git curl xz tar python patchelf qt6-base qt6-svg qt6-websockets pipewire rnnoise rust fluidsynth" ;;
+	suse)   echo "gcc gcc-c++ make cmake pkg-config git curl xz tar python3 patchelf qt6-base-devel qt6-svg-devel qt6-websockets-devel pipewire-devel rnnoise-devel cargo rust libfluidsynth3" ;;
+	debian) echo "build-essential cmake pkg-config git curl xz-utils python3 patchelf qt6-base-dev libqt6svg6-dev libqt6websockets6-dev libpipewire-0.3-dev librnnoise-dev cargo libfluidsynth3" ;;
 	*)      echo "" ;;
 	esac
 }
@@ -180,7 +233,14 @@ buildenv_packages() {
 buildenv_install_line() {
 	case "$ATOMIC_BASE" in
 	fedora) echo "dnf -y install --setopt=install_weak_deps=False $(buildenv_packages) && dnf clean all" ;;
-	arch)   echo "pacman -Syu --noconfirm --needed $(buildenv_packages) && pacman -Scc --noconfirm" ;;
+	# -Syuu and --overwrite: when the repos have been pinned back to a
+	# snapshot (SteamOS, below) this transaction is a *downgrade*, and one
+	# that crosses package splits -- newer Arch broke gcc-libs into libgomp,
+	# libatomic and friends, so going back finds those files already on disk.
+	# Both are harmless on a rolling base, where nothing is older than the
+	# image. Everything is one transaction on purpose: pacman downgrades
+	# itself here, and there must be no second pacman run afterwards.
+	arch)   echo "pacman -Syuu --noconfirm --needed --overwrite '*' $(buildenv_packages) && pacman -Scc --noconfirm" ;;
 	suse)   echo "zypper -n --gpg-auto-import-keys refresh && zypper -n install --no-recommends $(buildenv_packages) && zypper clean -a" ;;
 	debian) echo "apt-get update && apt-get install -y --no-install-recommends $(buildenv_packages) && rm -rf /var/lib/apt/lists/*" ;;
 	*)      echo "true" ;;
@@ -275,11 +335,14 @@ buildenv_ready() {
 		[[ "$want_kernel" != "1" || $BUILDENV_KERNEL -eq 1 ]] && return 0
 	fi
 
-	local kb="" spec hash tag
+	local kb="" spec hash tag snap=""
 	if [[ "$want_kernel" == "1" ]]; then
 		kb="$(buildenv_host_kbuild || true)"
 	fi
-	spec="$BUILDENV_BASE_IMAGE|$(buildenv_packages)|k=$want_kernel|hostkb=${kb:-no}|$KREL"
+	# Part of the tag below: a SteamOS release bump moves the snapshot, and
+	# the image built against the old one must not be reused.
+	[[ -z "${WAVELINE_BUILD_IMAGE:-}" ]] && snap="$(buildenv_snapshot_suffix || true)"
+	spec="$BUILDENV_BASE_IMAGE|$(buildenv_packages)|k=$want_kernel|hostkb=${kb:-no}|$KREL|snap=${snap:-no}"
 	hash="$(printf '%s' "$spec" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-12)"
 	tag="localhost/waveline-build:$hash"
 
@@ -290,6 +353,11 @@ buildenv_ready() {
 
 	{
 		printf 'FROM %s\n' "$BUILDENV_BASE_IMAGE"
+		if [[ -n "$snap" ]]; then
+			buildenv_write_snapshot_repos "$ctx" "$snap"
+			printf 'COPY pacman.conf /etc/pacman.conf\n'
+			printf 'COPY mirrorlist /etc/pacman.d/mirrorlist\n'
+		fi
 		printf 'RUN %s\n' "$(buildenv_install_line)"
 		# Only pull kernel headers into the image when the host cannot lend
 		# its own; a mounted /usr/lib/modules/$KREL is both exact and free.
@@ -298,6 +366,8 @@ buildenv_ready() {
 		fi
 	} > "$cf"
 	chown "$RUSER:$RUSER" "$cf" 2>/dev/null
+	[[ -n "$snap" ]] && chown "$RUSER:$RUSER" "$ctx/pacman.conf" "$ctx/mirrorlist" 2>/dev/null
+	BUILDENV_SNAPSHOT="$snap"
 
 	# `image inspect` rather than podman's `image exists`: docker has no such
 	# subcommand, and an unrecognised one would be read as "not built yet" and
@@ -311,6 +381,8 @@ buildenv_ready() {
 		fi
 	fi
 	rm -rf "$ctx"
+
+	buildenv_prune_stale "$tag"
 
 	BUILDENV_IMAGE="$tag"
 	BUILDENV_READY=1
@@ -330,6 +402,43 @@ buildenv_ready() {
 		  && BUILDENV_MOUNTS+=("$real:$real:ro")
 	fi
 	install -d -o "$RUSER" -g "$RUSER" "$BUILDENV_CACHE" "$BUILDENV_CARGO"
+	return 0
+}
+
+# Copies libfluidsynth.so.3 out of the build image into destdir, for a host
+# whose /usr is read-only and has no FluidSynth in it. Distinct from
+# buildenv_copy_libs only in that this library is wanted by name rather than
+# because the loader asked for it: nothing links against FluidSynth, wavelined
+# dlopens it, so it never shows up as a missing soname to go and fetch.
+#
+# What makes this safe on SteamOS is the snapshot pinning above -- the library
+# comes out built against the same glibc as everything else on the Deck.
+# Whatever *it* then needs and the host lacks is an ordinary missing-library
+# problem, and buildenv_bundle_libs already solves that one.
+buildenv_fluidsynth_lib() {
+	local dest="$1"
+	[[ "$BUILDENV" == "host" || "$BUILDENV" == "none" ]] && return 1
+	[[ $BUILDENV_READY -eq 1 ]] || return 1
+	buildenv_copy_libs "$dest" libfluidsynth.so.3 || return 1
+	[[ -f "$dest/libfluidsynth.so.3" ]] || return 1
+	return 0
+}
+
+# Removes build images this script made and no longer uses. The tag is a hash
+# of the base image, the package list, the kernel and the host's package
+# snapshot, so each of those moving strands a whole multi-gigabyte image --
+# and a Steam Deck is the machine least able to spare the space. Only
+# localhost/waveline-build is touched, never the base image, which is shared
+# and is most of what a rebuild would have to download again.
+buildenv_prune_stale() {
+	local keep="$1" img
+	BUILDENV_PRUNED=()
+	while read -r img; do
+		[[ -n "$img" && "$img" != "$keep" ]] || continue
+		buildenv_engine rmi -f "$img" >/dev/null 2>&1 \
+		  && BUILDENV_PRUNED+=("$img")
+	done < <(buildenv_engine images --format '{{.Repository}}:{{.Tag}}' \
+	         localhost/waveline-build 2>/dev/null)
 	return 0
 }
 
@@ -371,7 +480,12 @@ buildenv_describe() {
 	case "$BUILDENV" in
 		host)   printf 'host toolchain\n' ;;
 		none)   printf 'none (%s)\n' "${BUILDENV_ERR:-unavailable}" ;;
-		*)      printf '%s container from %s\n' "$BUILDENV_ENGINE" "$BUILDENV_BASE_IMAGE" ;;
+		*)      if [[ -n "$BUILDENV_SNAPSHOT" ]]; then
+			printf '%s container from %s, pinned to this system'"'"'s package snapshot (%s)\n' \
+				"$BUILDENV_ENGINE" "$BUILDENV_BASE_IMAGE" "$BUILDENV_SNAPSHOT"
+		else
+			printf '%s container from %s\n' "$BUILDENV_ENGINE" "$BUILDENV_BASE_IMAGE"
+		fi ;;
 	esac
 }
 
@@ -494,4 +608,28 @@ buildenv_set_rpath() {
 	local rpath="$1"; shift
 	[[ "$BUILDENV" == "host" ]] && return 0
 	buildenv_run "$ROOT" patchelf --set-rpath "$rpath" "$@" >/dev/null 2>&1
+}
+
+# Points every bundled library at the directory it is sitting in.
+#
+# Necessary because patchelf writes DT_RUNPATH, and a RUNPATH applies only to
+# the object that carries it -- not, as DT_RPATH did, to anything further down
+# the chain. So wavelined's RUNPATH finds libfluidsynth.so.3 in the bundle, and
+# then libfluidsynth's *own* search for libinstpatch ignores that RUNPATH
+# entirely and comes up empty. One dependency deep is where the difference
+# starts to show, which is exactly where a bundled FluidSynth lands.
+#
+# Giving each bundled library `$ORIGIN` closes it at every depth, and is a
+# smaller hammer than --force-rpath on the executables: nothing outside the
+# bundle directory changes its search order.
+buildenv_set_bundle_rpaths() {
+	local dir="$1" f
+	[[ "$BUILDENV" == "host" ]] && return 0
+	[[ -d "$dir" ]] || return 0
+	local -a libs=()
+	for f in "$dir"/*.so*; do [[ -f "$f" ]] && libs+=("$f"); done
+	[[ ${#libs[@]} -gt 0 ]] || return 0
+	buildenv_run "$ROOT" patchelf --set-rpath '$ORIGIN' "${libs[@]}" \
+	  >/dev/null 2>&1
+	return 0
 }

@@ -4,11 +4,11 @@
 #include "tuner.h"
 
 #include "rtsched.h"
+#include "umpcompat.h"
 
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 #include <spa/control/control.h>
-#include <spa/control/ump-utils.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/iter.h>
@@ -568,7 +568,9 @@ void onMidiProcess(void *userdata, spa_io_position *) {
 
                 if (control->type == SPA_CONTROL_Midi) {
                     d->handleMidiBytes(static_cast<const uint8_t *>(eventData), eventSize);
-                } else if (control->type == SPA_CONTROL_UMP) {
+                }
+#if WAVELINE_HAVE_SPA_UMP
+                else if (control->type == SPA_CONTROL_UMP) {
                     // Newer servers carry UMP packets; unpack them to MIDI 1.0
                     // the same way the synth filter does.
                     const auto *ump = static_cast<const uint32_t *>(eventData);
@@ -584,6 +586,7 @@ void onMidiProcess(void *userdata, spa_io_position *) {
                             break;
                     }
                 }
+#endif
             }
         }
         pw_filter_queue_buffer(d->midiIn, b);

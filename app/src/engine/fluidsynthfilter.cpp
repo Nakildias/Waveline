@@ -4,13 +4,14 @@
 #include "fluidsynthfilter.h"
 
 #include "dspprobe.h"
+#include "filterhost.h"
 #include "rtsched.h"
+#include "umpcompat.h"
 
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 #include <spa/buffer/buffer.h>
 #include <spa/control/control.h>
-#include <spa/control/ump-utils.h>
 #include <spa/pod/event.h>
 #include <spa/pod/iter.h>
 
@@ -32,6 +33,7 @@ struct PortData {
 struct FluidSynthFilter::Impl {
     pw_thread_loop *loop = nullptr;
     pw_filter *filter = nullptr;
+    spa_hook listener{};
     DspMeter meter;
     PortData *midiIn = nullptr;
     PortData *audioOut = nullptr;
@@ -71,7 +73,9 @@ void FluidSynthFilter::filterProcess(void *userdata, spa_io_position *position) 
                                     d->synth.handleMidiBytes(
                                         static_cast<const uint8_t *>(eventData),
                                         eventSize);
-                                } else if (control->type == SPA_CONTROL_UMP) {
+                                }
+#if WAVELINE_HAVE_SPA_UMP
+                                else if (control->type == SPA_CONTROL_UMP) {
                                     const auto *ump =
                                         static_cast<const uint32_t *>(eventData);
                                     size_t remaining = eventSize;
@@ -89,6 +93,7 @@ void FluidSynthFilter::filterProcess(void *userdata, spa_io_position *position) 
                                             break;
                                     }
                                 }
+#endif
                             }
                         }
                     }
@@ -133,9 +138,11 @@ bool FluidSynthFilter::start(const std::string &nodeName, const std::string &des
     pw_init(nullptr, nullptr);
     d_->meter.attach(nodeName, "MIDI synth");
 
-    d_->loop = pw_thread_loop_new("waveline-midi", nullptr);
+    // The shared DSP connection, not one of this filter's own. See filterhost.h.
+    if (!FilterHost::start(error)) return false;
+    d_->loop = FilterHost::loop();
     if (!d_->loop) {
-        error = "pw_thread_loop_new failed";
+        error = "shared filter connection unavailable";
         return false;
     }
 
@@ -155,8 +162,9 @@ bool FluidSynthFilter::start(const std::string &nodeName, const std::string &des
         "node.want-driver", "true",
         nullptr);
 
-    d_->filter = pw_filter_new_simple(pw_thread_loop_get_loop(d_->loop), nodeName.c_str(),
-                                      applyRealtimeProps(props), &kFluidSynthFilterEvents, d_.get());
+    d_->filter = pw_filter_new(FilterHost::core(), nodeName.c_str(), applyRealtimeProps(props));
+    if (d_->filter)
+        pw_filter_add_listener(d_->filter, &d_->listener, &kFluidSynthFilterEvents, d_.get());
     if (!d_->filter) {
         error = "pw_filter_new_simple failed";
         pw_thread_loop_unlock(d_->loop);
@@ -190,10 +198,6 @@ bool FluidSynthFilter::start(const std::string &nodeName, const std::string &des
 
     pw_thread_loop_unlock(d_->loop);
 
-    if (pw_thread_loop_start(d_->loop) < 0) {
-        error = "pw_thread_loop_start failed";
-        return false;
-    }
     return true;
 }
 
@@ -214,8 +218,8 @@ void FluidSynthFilter::stop() {
     d_->midiIn = nullptr;
     d_->audioOut = nullptr;
     pw_thread_loop_unlock(d_->loop);
-    pw_thread_loop_stop(d_->loop);
-    pw_thread_loop_destroy(d_->loop);
+    // The loop and the connection are shared and outlive this filter; only the
+    // node on them is ours to destroy. See filterhost.h.
     d_->loop = nullptr;
     // After the loop is gone, so nothing can still be inside the counters.
     d_->meter.detach();

@@ -82,13 +82,25 @@ A build image is created from the **host's own base distribution and release**:
 | Host | Base image |
 |---|---|
 | Silverblue / Kinoite / Bazzite / Bluefin / Aurora | `registry.fedoraproject.org/fedora:$VERSION_ID` |
-| SteamOS | `docker.io/library/archlinux:base-devel` |
+| SteamOS | `docker.io/library/archlinux:base-devel`, repos pinned to the host's snapshot |
 | MicroOS / Aeon / Kalpa | `registry.opensuse.org/opensuse/tumbleweed:latest` |
 | anything else | `WAVELINE_BUILD_IMAGE=…` |
 
 Matching the release is the whole point: a binary built against Fedora 42's Qt
 runs on Fedora 42's Qt. Matching it loosely is what produces a binary that will
 not start.
+
+Arch has no releases to match, which makes SteamOS the awkward case: the base
+image is rolling and the Deck is a frozen snapshot, so the container is ahead of
+the host from the day the image is a few weeks old — far enough ahead that the
+mixer wants a glibc the Deck does not have. So on SteamOS the container's
+`core`/`extra`/`multilib` are repointed at the *versioned* repositories Valve
+serves from `steamdeck-packages.steamos.cloud` — `core-3.7`, `extra-3.7`, and so
+on, the same ones the Deck's own pacman uses. The suffix is read out of the
+host's `/etc/pacman.conf`, so a SteamOS release bump moves the pin on its own
+and invalidates the cached image with it. `pacman -Syuu` then walks the fresh
+image *back* to the host's exact package set: same glibc, same Qt, same
+everything the mixer links against.
 
 **`none`** — no engine and no host toolchain. The install continues and puts in
 everything that needs no compiler; the mixer is skipped with an explanation.
@@ -130,7 +142,33 @@ Two things are deliberately **not** bundled:
   `WebSockets`) carry no plugins and are bundled normally.
 - **glibc, libstdc++, libgcc.** If the binary needs a newer one than the host
   has, that is a base-image mismatch and bundling cannot fix it. The installer
-  reports the exact symbol versions and points at `WAVELINE_BUILD_IMAGE`.
+  reports the exact symbol versions and points at `WAVELINE_BUILD_IMAGE`. On
+  SteamOS this should no longer happen — the repos are pinned to the host's own
+  snapshot (above) — and if it does, the first thing to check is whether
+  `WAVELINE_BUILD_IMAGE` is set, since setting it turns the pinning off.
+
+### FluidSynth
+
+`libfluidsynth.so.3` is the one library taken out of the container **by name**
+rather than because the loader asked for it. Nothing links against FluidSynth —
+`wavelined` dlopens it — so it never appears as a missing soname for the bundler
+to chase, and without it MIDI instrument playback is simply absent.
+
+On a mutable system the installer runs `pacman -S fluidsynth` (or the dnf/apt
+equivalent). On an image-based one it may not, so it copies the library out of
+the build image into `app/lib/` instead, which is where `app/CMakeLists.txt`
+already looks for it. Nothing is added to `/usr`. Anything FluidSynth itself
+needs and the host lacks is then an ordinary missing-library problem, and the
+bundler above already handles it.
+
+### JACK / DAWs
+
+The installer does not change host packages on an image-based system, so it
+cannot replace a `jack2` that has displaced the PipeWire shim. It does still
+**check**, because which package owns `libjack.so.0` is a read-only question:
+it reports what is actually there and prints the one-time layering command only
+if the answer is wrong. SteamOS ships `pipewire-jack` and no `jack2`, so on a
+Steam Deck this step passes with nothing to do.
 
 ### SteamOS
 
@@ -148,8 +186,13 @@ on the way out** — including if the script dies partway, via an `EXIT` trap.
 
 It is opt-in because a SteamOS update replaces the image and takes those
 packages with it. Waveline itself lives in `$HOME` and `/var` and survives; only
-the build dependencies go, and re-running the installer restores them. Without
-the flag, SteamOS takes the container path like everything else.
+the build dependencies go, and re-running the installer restores them.
+
+Without the flag, SteamOS takes the container path like everything else — and
+because that container is pinned to the Deck's own package snapshot, it produces
+the same binaries the unlocked build would, while leaving `/usr` alone. The
+container is the recommended path; `WAVELINE_STEAMOS_UNLOCK=1` is there for
+anyone who would rather not have podman pull two gigabytes.
 
 ---
 

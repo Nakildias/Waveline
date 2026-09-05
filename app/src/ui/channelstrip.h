@@ -11,6 +11,7 @@
 #pragma once
 
 #include <QColor>
+#include <QPoint>
 #include <QString>
 
 #include "widgets.h"
@@ -152,6 +153,17 @@ public:
     bool fadersLinked() const;
     void setFadersLinked(bool on);
 
+    // Makes the link button double as this card's drag handle, so the row can
+    // be reordered by grabbing it. The button keeps its click behaviour: a
+    // press that never travels is still a toggle, and only movement past the
+    // system drag threshold turns the gesture into a drag. It is the right
+    // grip for the job because it is the one control on the card that is not
+    // a fader, a meter or a menu -- there is nothing above it to grab by
+    // mistake, and it already sits centred at the top of the card.
+    void enableDragHandle(bool on = true);
+    // Mime type carrying a channel id while a card is being dragged.
+    static const char *dragMimeType();
+
 signals:
     void fadersLinkedChanged(bool on);
     // The identity tile was clicked: open this card's name/colour/icon panel.
@@ -168,6 +180,9 @@ signals:
 
 protected:
     bool eventFilter(QObject *obj, QEvent *ev) override;
+    // Turns a press-and-travel on the link button into a QDrag; returns true
+    // when it did, so the caller knows to swallow the event.
+    bool maybeStartReorderDrag(QMouseEvent *me);
     void showEvent(QShowEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
@@ -247,4 +262,9 @@ private:
     // Guards the second half of a linked move, which would otherwise come
     // straight back in and move the first fader again.
     bool linking_ = false;
+
+    // Drag-handle state for the link button; see enableDragHandle().
+    bool dragHandle_ = false;
+    bool dragArmed_ = false;
+    QPoint dragPress_;
 };

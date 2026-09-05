@@ -54,6 +54,7 @@ pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
 # libdf.so at runtime instead, so all that is needed here is libdl.
 
 add_library(wavelineengine STATIC
+    src/engine/filterhost.cpp
     src/engine/pwengine.cpp
     src/engine/mixergraph.cpp
     src/engine/denoiser.cpp

@@ -5,9 +5,11 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -30,14 +32,38 @@ QLabel *dimLabel(const QString &text, QWidget *parent) {
 CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     : QWidget(parent, Qt::Window), client_(client) {
     setWindowTitle(tr("Web Companion"));
-    resize(520, 560);
-    setMinimumSize(430, 470);
+    resize(520, 620);
+    // Only the width has a floor. Almost everything in this window is a
+    // word-wrapped paragraph, so the height it needs is a function of the
+    // width it is given -- and the Addresses card grows by a row per network
+    // interface once the server is up. Pinning a minimum height and hoping it
+    // is enough is what made the text squeeze into itself on a short screen;
+    // the scroll area below is what actually guarantees the space.
+    setMinimumWidth(430);
 
-    auto *outer = new QVBoxLayout(this);
+    auto *windowLay = new QVBoxLayout(this);
+    windowLay->setContentsMargins(0, 0, 0, 0);
+    windowLay->setSpacing(0);
+
+    scroll_ = new QScrollArea(this);
+    scroll_->setWidgetResizable(true);
+    scroll_->setFrameShape(QFrame::NoFrame);
+    // Horizontal scrolling off on purpose: a QLabel's heightForWidth only
+    // gives an honest answer when the width is settled, and an escape hatch
+    // sideways would let the layout dodge wrapping instead of growing.
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    windowLay->addWidget(scroll_);
+
+    body_ = new QWidget(scroll_);
+    scroll_->setWidget(body_);
+    // Every width change is a new set of line breaks and so a new height.
+    scroll_->viewport()->installEventFilter(this);
+
+    auto *outer = new QVBoxLayout(body_);
     outer->setContentsMargins(16, 16, 16, 16);
     outer->setSpacing(12);
 
-    auto *title = new QLabel(tr("Web Companion"), this);
+    auto *title = new QLabel(tr("Web Companion"), body_);
     QFont tf = title->font();
     tf.setBold(true);
     tf.setPointSizeF(tf.pointSizeF() * 1.2);
@@ -48,12 +74,12 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
         tr("Use a phone or tablet as a second control surface. Open one of the "
            "addresses below in its browser and you get the inputs, the "
            "channels, the application settings and both mixes, live."),
-        this);
+        body_);
     blurb->setWordWrap(true);
     outer->addWidget(blurb);
 
     // ------------------------------------------------------------ status
-    auto *statusCard = new Section(tr("Server"), this);
+    auto *statusCard = new Section(tr("Server"), body_);
     auto *statusLay = statusCard->contentLayout();
 
     auto *statusRow = new QHBoxLayout;
@@ -88,7 +114,7 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     outer->addWidget(statusCard);
 
     // ----------------------------------------------------------- settings
-    auto *settings = new Section(tr("Settings"), this);
+    auto *settings = new Section(tr("Settings"), body_);
     auto *setLay = settings->contentLayout();
 
     auto *portRow = new QHBoxLayout;
@@ -140,7 +166,7 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     outer->addWidget(settings);
 
     // ---------------------------------------------------------- addresses
-    auto *addresses = new Section(tr("Addresses"), this);
+    auto *addresses = new Section(tr("Addresses"), body_);
     addressLay_ = addresses->contentLayout();
     addressHint_ = dimLabel(
         tr("Start the server to see the addresses it answers on."), addresses);
@@ -153,7 +179,7 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
         tr("Anyone who can reach this machine on your network can open the "
            "companion and change your mixer — there is no password. Leave it "
            "stopped on networks you do not control."),
-        this);
+        body_);
     warning->setWordWrap(true);
     {
         QPalette p = warning->palette();
@@ -171,9 +197,28 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     refresh();
 }
 
+void CompanionWindow::syncBodyHeight() {
+    if (!body_ || !scroll_) return;
+    QLayout *lay = body_->layout();
+    if (!lay) return;
+    const int w = scroll_->viewport()->width();
+    if (w <= 0) return;
+    body_->setMinimumHeight(lay->minimumHeightForWidth(w));
+}
+
+bool CompanionWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (scroll_ && watched == scroll_->viewport() &&
+        event->type() == QEvent::Resize)
+        syncBodyHeight();
+    return QWidget::eventFilter(watched, event);
+}
+
 void CompanionWindow::showEvent(QShowEvent *e) {
     QWidget::showEvent(e);
     refresh();
+    // The addresses list is rebuilt by refresh(), so the height it needs is
+    // only knowable afterwards.
+    syncBodyHeight();
 }
 
 void CompanionWindow::onAvailabilityChanged(bool available) {
@@ -271,6 +316,7 @@ void CompanionWindow::rebuildAddresses(const QStringList &urls) {
         addressHint_->setText(
             tr("Start the server to see the addresses it answers on."));
         addressHint_->show();
+        syncBodyHeight();
         return;
     }
 
@@ -302,4 +348,7 @@ void CompanionWindow::rebuildAddresses(const QStringList &urls) {
         holder->setLayout(row);
         addressLay_->addWidget(holder);
     }
+
+    // A row per network interface just appeared; the body is that much taller.
+    syncBodyHeight();
 }

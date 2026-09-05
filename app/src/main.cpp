@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
 
 #include <QApplication>
+#include <QIcon>
 #include <QTimer>
 
 #include <cstdio>
@@ -15,6 +16,20 @@ int main(int argc, char **argv) {
     QApplication::setApplicationName(QStringLiteral("waveline-mixer"));
     QApplication::setApplicationVersion(QStringLiteral(WAVELINE_VERSION));
     QApplication::setOrganizationName(QStringLiteral("waveline"));
+
+    // The launcher entry gets its icon from the .desktop file, but a *running*
+    // window is a separate question and nothing above answers it -- which is
+    // why the task manager and the alt-tab switcher were showing a placeholder
+    // for a mixer whose menu entry looked perfectly fine.
+    //
+    // Two mechanisms because there are two display protocols. On Wayland the
+    // window carries an app id and the compositor looks the .desktop file up
+    // by that name; setDesktopFileName is what makes Qt send the right one.
+    // On X11 the icon travels with the window itself, as pixels, which is what
+    // setWindowIcon provides. Setting both leaves nothing to the session.
+    QGuiApplication::setDesktopFileName(QStringLiteral("waveline-mixer"));
+    QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("waveline-mixer")));
+
     Theme::apply();
 
     // --screenshot renders the window once and exits. Works under

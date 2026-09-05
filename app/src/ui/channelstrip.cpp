@@ -5,13 +5,18 @@
 
 #include <algorithm>
 
+#include <QApplication>
+#include <QDrag>
 #include <QEvent>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
+#include <QPointer>
 #include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -418,11 +423,100 @@ void ChannelStrip::enableEditableTitle(bool on) {
     }
 }
 
+const char *ChannelStrip::dragMimeType() {
+    return "application/x-waveline-channel";
+}
+
+void ChannelStrip::enableDragHandle(bool on) {
+    if (!link_ || dragHandle_ == on) return;
+    dragHandle_ = on;
+    if (on) {
+        link_->installEventFilter(this);
+        // An open hand rather than a closed one: the card is not held yet.
+        link_->setCursor(Qt::OpenHandCursor);
+        link_->setToolTip(link_->toolTip() +
+                          tr("\n\nDrag this button to move the card along the "
+                             "row."));
+    } else {
+        link_->removeEventFilter(this);
+        link_->unsetCursor();
+    }
+}
+
+bool ChannelStrip::maybeStartReorderDrag(QMouseEvent *me) {
+    if (!dragArmed_) return false;
+    if ((me->pos() - dragPress_).manhattanLength() <
+        QApplication::startDragDistance())
+        return false;
+
+    // Past the threshold this is a drag, not a click. Disarm first: exec()
+    // below runs its own event loop, and re-entering here would start a
+    // second drag inside the first.
+    dragArmed_ = false;
+
+    auto *mime = new QMimeData;
+    mime->setData(QString::fromLatin1(dragMimeType()), id_.toUtf8());
+
+    auto *drag = new QDrag(this);
+    drag->setMimeData(mime);
+    // The card itself is the cursor, at half strength so the row it is being
+    // dragged over stays readable underneath it.
+    QPixmap shot(size() * devicePixelRatioF());
+    shot.setDevicePixelRatio(devicePixelRatioF());
+    shot.fill(Qt::transparent);
+    render(&shot);
+    QPixmap faded(shot.size());
+    faded.setDevicePixelRatio(shot.devicePixelRatioF());
+    faded.fill(Qt::transparent);
+    {
+        QPainter p(&faded);
+        p.setOpacity(0.7);
+        p.drawPixmap(0, 0, shot);
+    }
+    drag->setPixmap(faded);
+    drag->setHotSpot(link_->mapTo(this, dragPress_));
+
+    // exec() runs a nested event loop, and deferred deletions are processed
+    // inside it -- so a channel that goes away mid-drag takes this card with
+    // it and everything below would be touching freed memory.
+    QPointer<ChannelStrip> alive(this);
+    drag->exec(Qt::MoveAction);
+    if (!alive) return true;
+
+    // The press that started this never got its release -- the drag ate it --
+    // so the button would otherwise stay visibly held down.
+    if (link_) link_->setDown(false);
+    return true;
+}
+
 bool ChannelStrip::eventFilter(QObject *obj, QEvent *ev) {
     if (titleEditable_ && obj == titleLabel_ && ev->type() == QEvent::MouseButtonRelease) {
         auto *me = static_cast<QMouseEvent *>(ev);
         if (me->button() == Qt::LeftButton) beginTitleEdit();
         return true;
+    }
+    if (dragHandle_ && obj == link_) {
+        switch (ev->type()) {
+        case QEvent::MouseButtonPress: {
+            auto *me = static_cast<QMouseEvent *>(ev);
+            if (me->button() == Qt::LeftButton) {
+                dragArmed_ = true;
+                dragPress_ = me->pos();
+            }
+            // Not swallowed: a press that never travels must still reach the
+            // button and toggle it.
+            break;
+        }
+        case QEvent::MouseMove:
+            if (maybeStartReorderDrag(static_cast<QMouseEvent *>(ev)))
+                return true;
+            break;
+        case QEvent::MouseButtonRelease:
+            dragArmed_ = false;
+            break;
+        default:
+            break;
+        }
     }
     return CardBase::eventFilter(obj, ev);
 }

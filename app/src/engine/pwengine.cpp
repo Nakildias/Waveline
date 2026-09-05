@@ -1624,17 +1624,40 @@ bool PwEngine::repairPath(const PathSpec &spec, std::string &error) {
         removePath(spec.handle);
     }
 
-    if (!addPath(spec, error)) return false;
-    sync();
     const std::string port =
         spec.inChannels == 1 ? "input_MONO" : "input_FL";
-    if (!waitForPort(capName, port, false, 2000)) {
-        error = "path capture not ready: " + capName;
-        return false;
+    // A loopback's ports appear when its capture stream has negotiated, and
+    // how long that takes depends on how busy the graph already is -- not on
+    // anything about this path. Building the full graph is a dozen loopbacks
+    // and thirty filter nodes, so the paths created last are racing the most
+    // loaded server, and on a slow machine one of them loses.
+    //
+    // It was a hard two-second wait and then a failed startup, which on a
+    // Steam Deck meant wavelined never came up at all: the daemon died, the
+    // unit restarted it, and it lost the same race again. Which path drew the
+    // short straw moved around from boot to boot -- the tell that this is
+    // load, not a path that cannot be built.
+    //
+    // So: try again rather than give up, the way the mic path already does.
+    // The retry costs nothing on a machine that was going to win the race
+    // anyway, because the wait ends the moment the port shows up.
+    constexpr int kPortWaitMs = 4000;
+    constexpr int kAttempts = 3;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        if (!addPath(spec, error)) return false;
+        sync();
+        if (waitForPort(capName, port, false, kPortWaitMs)) {
+            setPathVolume(spec.handle, spec.volume);
+            setPathMuted(spec.handle, spec.muted);
+            return true;
+        }
+        // Nothing to keep: a loopback whose capture end never negotiated is
+        // not going to start later, and leaving it behind would make the next
+        // addPath fail on "path already exists".
+        removePath(spec.handle);
     }
-    setPathVolume(spec.handle, spec.volume);
-    setPathMuted(spec.handle, spec.muted);
-    return true;
+    error = "path capture not ready: " + capName;
+    return false;
 }
 
 bool PwEngine::hasPort(const std::string &node, const std::string &port,
