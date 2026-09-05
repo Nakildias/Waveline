@@ -11,6 +11,7 @@
 #include "engine/creativefxspec.h"
 #include "engine/dspprobe.h"
 #include "engine/masterbus.h"
+#include "engine/filterhost.h"
 #include "engine/rtsched.h"
 
 #include <QCoreApplication>
@@ -249,7 +250,14 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
     });
 }
 
-MixerService::~MixerService() = default;
+// Ordered by hand rather than left to the members, because the shared filter
+// connection sits between two of them: every filter node has to be gone before
+// the core they live on is disconnected, and the filters belong to the graph.
+// See engine/filterhost.h.
+MixerService::~MixerService() {
+    graph_.reset();
+    waveline::FilterHost::stop();
+}
 
 void MixerService::muteOutputsForShutdown() {
     Profile &p = config_.live();

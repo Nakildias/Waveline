@@ -14,6 +14,7 @@
 
 #include <QHash>
 #include <QMainWindow>
+#include <QStringList>
 #include <QTimer>
 
 class AboutWindow;
@@ -25,6 +26,7 @@ class GlobalEffectsWindow;
 class IconToggle;
 class LevelMeter;
 class MixerClient;
+struct ChannelInfo;
 struct MonitorOutputInfo;
 struct OutputInfo;
 class CompanionWindow;
@@ -61,6 +63,9 @@ public:
 protected:
     void showEvent(QShowEvent *) override;
     void hideEvent(QHideEvent *) override;
+    // Drag-and-drop reordering of the channel cards happens on the strip row;
+    // see handleStripDrag().
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onChanged();
@@ -200,6 +205,25 @@ private:
     // Pushes that state onto the card: top meter tint and caption.
     void applyMasterMonitorState(const QString &masterId);
     QHash<QString, ChannelStrip *> strips_;
+
+    // ------------------------------------------------- channel card order
+    // Purely a window preference: the daemon has no notion of a left-to-right
+    // order and does not need one, so this lives in QSettings next to the
+    // per-card link state rather than going over D-Bus. Ids the daemon no
+    // longer reports are kept rather than pruned -- a channel that comes back
+    // should come back where the user put it.
+    QWidget *stripHost_ = nullptr;
+    QStringList channelOrder_;
+    void loadChannelOrder();
+    void saveChannelOrderFromRow();
+    // Sorts the daemon's channel list into the remembered order. Anything not
+    // in it goes to the end, in the order the daemon gave, so a newly created
+    // channel appears where it always did.
+    QList<ChannelInfo> orderedChannels() const;
+    // Live drag handling on stripHost_; see the drag handle on ChannelStrip.
+    bool handleStripDrag(QEvent *event);
+    // The channel strip the cursor is over, or the gap it is nearest.
+    int channelDropIndex(const QPoint &hostPos) const;
 
     // -------------------------------------------------------------- outputs
     struct MonitorOutputRowUi {

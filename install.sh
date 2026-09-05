@@ -362,7 +362,18 @@ build_mixer_app_only() {
 		warn "build failed -- see /tmp/waveline-mixer-build.log"
 		return 1
 	fi
-	stage_runtime_libs "$ROOT/app/build/waveline-mixer" || return 1
+	# Every binary that is installed, not just the one this path rebuilt.
+	# install_runtime_libs mirrors the staging directory rather than merging
+	# into it, so staging against the mixer alone would delete the libraries
+	# only wavelined needs -- librnnoise above all -- and leave a daemon that
+	# no longer starts. A full install is not required to get it back, but
+	# nobody would think to run one.
+	APP_ONLY_BINS=("$ROOT/app/build/waveline-mixer")
+	for b in wavelined wavelined-cli; do
+		[[ -x "$ROOT/app/build/$b" && -x "$BIND/$b" ]] \
+		  && APP_ONLY_BINS+=("$ROOT/app/build/$b")
+	done
+	stage_runtime_libs "${APP_ONLY_BINS[@]}" || return 1
 	install -d -o "$RUSER" -g "$RUSER" "$BIND"
 	install -m755 -o "$RUSER" -g "$RUSER" "$ROOT/app/build/waveline-mixer" "$BIND/waveline-mixer"
 	install_runtime_libs
@@ -388,6 +399,17 @@ stage_runtime_libs() {
 	# RPATH is exactly the kind of bug nobody would think to look for.
 	rm -rf "$stage"
 	install -d -o "$RUSER" -g "$RUSER" "$stage"
+	# Seeded before the bundler runs rather than added after it. FluidSynth
+	# out of the container is a library the host genuinely does not have, but
+	# ldd will not say so: wavelined's build-tree RPATH reaches app/lib, where
+	# it was just staged, so the loader is satisfied and the bundler sees
+	# nothing missing to go and fetch. Putting it in the stage directory up
+	# front both gets it installed and lets the bundler chase *its*
+	# dependencies -- libinstpatch and friends -- in the same rounds.
+	if [[ $FLUIDSYNTH_BUNDLED -eq 1 && -f "$FLUIDSYNTH_LIB" ]]; then
+		install -m755 -o "$RUSER" -g "$RUSER" "$FLUIDSYNTH_LIB" \
+			"$stage/libfluidsynth.so.3"
+	fi
 	if ! buildenv_bundle_libs "$stage" "$@"; then
 		warn "the mixer cannot run on this system as built:"
 		warn "  ${BUILDENV_ERR:-unknown}"
@@ -406,6 +428,10 @@ stage_runtime_libs() {
 		*newer\ than\ this\ system*)
 			warn "  The base image is newer than your host. Pin it to your release:"
 			warn "      sudo WAVELINE_BUILD_IMAGE=<image:tag> ./install.sh"
+			if [[ "$ATOMIC_KIND" == "steamos" && -n "${WAVELINE_BUILD_IMAGE:-}" ]]; then
+				warn "  You set WAVELINE_BUILD_IMAGE yourself; unset it and this script"
+				warn "  will pin the container to SteamOS's own package snapshot."
+			fi
 			;;
 		esac
 		return 1
@@ -413,6 +439,9 @@ stage_runtime_libs() {
 	# patchelf lives in the build image, so this costs the host nothing. The
 	# second entry keeps the bundled-FluidSynth layout in app/lib working.
 	buildenv_set_rpath '$ORIGIN/../lib/waveline/runtime:$ORIGIN/../lib' "$@"
+	# And the bundle's own libraries at each other -- see the comment on
+	# buildenv_set_bundle_rpaths for why the line above is not enough.
+	buildenv_set_bundle_rpaths "$stage"
 	STAGED_RUNTIME=1
 	find "$stage" -maxdepth 1 -name '*.so*' -printf '    ok   bundled %f\n' 2>/dev/null
 	return 0
@@ -492,6 +521,13 @@ fluidsynth_install_pkg() {
 # has to know to reconfigure.
 FLUIDSYNTH_CHANGED=0
 
+# 1 when app/lib/libfluidsynth.so.3 came out of the build container rather than
+# off the host. It then has to be *installed* as well as staged: CMake links
+# wavelined against it, and app/lib is a build-tree path that the installed
+# binary in ~/.local/bin cannot see. On every other system the loader finds the
+# distribution's own copy in /usr/lib and there is nothing to carry.
+FLUIDSYNTH_BUNDLED=0
+
 stage_fluidsynth() {
 	local had=0 lib
 	[[ -f "$FLUIDSYNTH_LIB" ]] && had=1
@@ -519,6 +555,24 @@ stage_fluidsynth() {
 		esac
 		fluidsynth_install_pkg
 		lib="$(fluidsynth_system_lib || true)"
+	fi
+
+	# Nothing on the host, and nothing may be put there -- but the build
+	# container has a FluidSynth, because the image installs one for exactly
+	# this. Lifting the library out of it is the atomic equivalent of the
+	# pacman/dnf/apt call above, and it touches no part of the system.
+	if [[ -z "$lib" && $ATOMIC -eq 1 ]]; then
+		ok "installing FluidSynth from the build container (nothing is added to /usr)"
+		install -d -o "$RUSER" -g "$RUSER" "$ROOT/app/lib"
+		if buildenv_fluidsynth_lib "$ROOT/app/lib"; then
+			chown "$RUSER:$RUSER" "$FLUIDSYNTH_LIB" 2>/dev/null
+			chmod 755 "$FLUIDSYNTH_LIB" 2>/dev/null
+			FLUIDSYNTH_BUNDLED=1
+			[[ $had -eq 0 ]] && FLUIDSYNTH_CHANGED=1
+			ok "FluidSynth staged from the build container into app/lib/"
+			return 0
+		fi
+		warn "could not take FluidSynth out of the build container"
 	fi
 
 	if [[ -z "$lib" ]]; then
@@ -693,10 +747,16 @@ if [[ $HOST_PKGS -eq 0 ]]; then
 		warn "  the mixer stops building afterwards."
 	else
 		ok "not installing anything on the host -- using $(buildenv_describe)"
-		echo  "         Building the image now if this is the first run; that step"
-		echo  "         downloads the base image and its development packages once."
+		echo  "         Building the image now if this is the first run. That"
+		echo  "         downloads about a gigabyte of base image and development"
+		echo  "         packages and takes a few minutes, with nothing printed"
+		echo  "         while it runs -- it is not stuck. Later runs reuse it."
+		echo  "         Watch it if you like:  tail -f /tmp/waveline-buildenv.log"
 		if buildenv_ready 0; then
 			ok "build environment ready: $BUILDENV_IMAGE"
+			for img in "${BUILDENV_PRUNED[@]}"; do
+				ok "reclaimed space from superseded build image $img"
+			done
 		else
 			warn "${BUILDENV_ERR:-could not prepare the build environment}"
 			BUILDENV="none"
@@ -948,6 +1008,10 @@ kernel_patch_atomic() {
 	# Staged inside the build environment rather than on the host: the tree is
 	# extracted from an upstream tarball and needs curl, tar and python3, and
 	# the container is the one place all three are guaranteed to be present.
+	echo  "         Downloading the kernel source tarball, patching it and"
+	echo  "         building the module. Several minutes, nothing printed while"
+	echo  "         it runs -- it is not stuck. Logs: /tmp/waveline-prepare.log"
+	echo  "         and /tmp/waveline-build.log"
 	if ! buildenv_run "$ROOT" env WAVELINE_PROFILES="$DETECTED" \
 	     bash "$ROOT/scripts/prepare-src.sh" >/tmp/waveline-prepare.log 2>&1; then
 		warn "could not stage/patch sources -- see /tmp/waveline-prepare.log"
@@ -1310,31 +1374,69 @@ fi
 # a real jackd.
 say "5/9  JACK compatibility (DAW support)"
 
-# Package that owns the libjack the dynamic linker actually finds, or empty.
-jack_provider() {
+# The libjack the dynamic linker actually finds, or empty.
+jack_lib() {
 	local lib
 	for lib in /usr/lib/libjack.so.0 /usr/lib64/libjack.so.0 /usr/lib/*/libjack.so.0; do
-		[[ -e "$lib" ]] || continue
-		case "$FAM" in
-		arch)   pacman -Qoq "$lib" 2>/dev/null ;;
-		fedora) rpm -qf --qf '%{NAME}\n' "$lib" 2>/dev/null ;;
-		debian) dpkg -S "$lib" 2>/dev/null | cut -d: -f1 ;;
-		esac
-		return
+		[[ -e "$lib" ]] && { printf '%s\n' "$lib"; return 0; }
 	done
+	return 1
+}
+
+# Package that owns it, or empty.
+jack_provider() {
+	local lib
+	lib="$(jack_lib)" || return 1
+	case "$FAM" in
+	arch)   pacman -Qoq "$lib" 2>/dev/null ;;
+	fedora) rpm -qf --qf '%{NAME}\n' "$lib" 2>/dev/null ;;
+	debian) dpkg -S "$lib" 2>/dev/null | cut -d: -f1 ;;
+	esac
+}
+
+# The one-time command that adds the shim to an image, per family.
+jack_shim_pkg() {
+	case "$FAM" in
+	fedora) echo "pipewire-jack-audio-connection-kit" ;;
+	*)      echo "pipewire-jack" ;;
+	esac
 }
 
 if [[ -n "${WAVELINE_KEEP_JACK2:-}" ]]; then
 	ok "WAVELINE_KEEP_JACK2 set -- leaving the JACK implementation alone"
 elif [[ $HOST_PKGS -eq 0 ]]; then
 	# Nothing may be added to the host image, and a shim installed into the
-	# build container would not be the one a DAW on the host loads.
-	warn "image-based system: not changing host packages."
-	warn "  If you use a DAW, check that libjack comes from PipeWire and not"
-	warn "  from jack2, or the two will fight over the sound card:"
-	case "$FAM" in
-	fedora) warn "    rpm-ostree install pipewire-jack-audio-connection-kit" ;;
-	*)      warn "    install your distribution's pipewire-jack package" ;;
+	# build container would not be the one a DAW on the host loads. Which
+	# libjack is already there, though, is a read-only question -- so answer
+	# it, rather than warn about a problem this machine may well not have.
+	# SteamOS, for one, ships pipewire-jack and no jack2 at all.
+	JACK_OWNER="$(jack_provider)"
+	case "$JACK_OWNER" in
+	*pipewire*)
+		ok "libjack comes from PipeWire ($JACK_OWNER) -- DAWs will join the"
+		ok "  existing graph and see Waveline's channels as ports"
+		;;
+	"")
+		if jack_lib >/dev/null; then
+			# There is a libjack but the package database does not admit to
+			# owning it -- layered by hand, or put there by something that is
+			# not the package manager. Not ours to guess about.
+			warn "libjack is present but no package owns it ($(jack_lib))."
+			warn "  If a DAW misbehaves, check it is the PipeWire shim and not jack2."
+		else
+			ok "no libjack installed -- nothing is fighting PipeWire for the card"
+			echo  "         A DAW needs the JACK shim. Nothing may be added to a"
+			echo  "         read-only image, so add it once yourself if you use one:"
+			echo  "             $(atomic_layer_cmd "$(jack_shim_pkg)")"
+		fi
+		;;
+	*)
+		warn "libjack comes from $JACK_OWNER, not PipeWire."
+		warn "  A DAW will start a second audio server and fight PipeWire for the"
+		warn "  sound card -- everything on the machine crackles, not just the DAW."
+		warn "  Nothing may be changed on a read-only image, so replace it yourself:"
+		warn "      $(atomic_layer_cmd "$(jack_shim_pkg)")"
+		;;
 	esac
 else
 	JACK_OWNER="$(jack_provider)"
@@ -1586,6 +1688,14 @@ fi
 if [[ $MIXER_DEPS_OK -eq 1 ]]; then
 	match_build_dir_to_env
 	stage_fluidsynth
+	# cmake prints to a log rather than the terminal, so this is several
+	# minutes of nothing at all -- and on a handheld nearer ten. Say so
+	# before it starts: a silent step that long reads as a hang, and the
+	# reflex is to interrupt it and leave a half-built tree behind.
+	echo  "         Compiling the mixer, the daemon and the audio engine."
+	echo  "         This is the long step: a few minutes on a desktop, longer on"
+	echo  "         a handheld. It is not stuck. Watch it if you like:"
+	echo  "             tail -f /tmp/waveline-mixer-build.log"
 	# Built as the user, not as root: the build tree lands in the repo and
 	# root-owned object files would be a nuisance to clean up afterwards.
 	if buildenv_run "$ROOT" cmake -S "$ROOT/app" -B "$ROOT/app/build" \

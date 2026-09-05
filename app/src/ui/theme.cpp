@@ -327,6 +327,13 @@ QComboBox {
     padding: 5px 10px;
     min-height: 20px;
     color: %TEXT%;
+    /* Plain list, not a menu-style popup. Fusion's menu-style dropdown puts a
+       five pixel margin around the list and paints nothing in it, and the
+       popup is its own opaque top-level window -- so those pixels come out as
+       a black band across the top and bottom of every dropdown. Turning the
+       menu style off makes the popup exactly the list, with nothing left
+       unpainted. */
+    combobox-popup: 0;
 }
 QComboBox:hover { background: %CARDHOVER%; }
 QComboBox:disabled { color: %TEXTFAINT%; }

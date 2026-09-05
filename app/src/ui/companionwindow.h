@@ -20,6 +20,7 @@
 class MixerClient;
 class QLabel;
 class QPushButton;
+class QScrollArea;
 class QSpinBox;
 class QVBoxLayout;
 class StatusDot;
@@ -33,6 +34,9 @@ public:
 
 protected:
     void showEvent(QShowEvent *) override;
+    // Keeps the scrolled body tall enough for the text it is wrapping; see
+    // syncBodyHeight().
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void refresh();
@@ -46,8 +50,20 @@ private:
     // is already in use" is something the user fixes in the spin box two rows
     // up, and a modal dialog puts itself between them and it.
     void showError(const QString &text);
+    // Almost every widget in here is a word-wrapped paragraph, and a wrapped
+    // QLabel reports a *one line* minimum height however long its text is --
+    // it has no way to know its own width yet. So a plain QScrollArea will
+    // happily squash the whole column down to one line per paragraph and show
+    // no scrollbar at all, because by its arithmetic everything fits. That is
+    // the panel collapsing into itself. Asking the layout what height it needs
+    // at the width it actually has, and making that the body's minimum, is
+    // what turns the overflow into scrolling.
+    void syncBodyHeight();
 
     MixerClient *client_ = nullptr;
+
+    QScrollArea *scroll_ = nullptr;
+    QWidget *body_ = nullptr;
 
     StatusDot *dot_ = nullptr;
     QLabel *statusLabel_ = nullptr;

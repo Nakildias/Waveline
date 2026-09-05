@@ -4,6 +4,7 @@
 #include "mixergraph.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <algorithm>
@@ -21,6 +22,57 @@ const std::vector<std::pair<const char *, const char *>> kDefaultChannels = {
     {"game", "Game"},
     {"sfx", "SFX"},
 };
+
+// Which of the default channels to actually build, from WAVELINE_CHANNELS as a
+// comma-separated list of ids ("system", or "system,voice,game"). Unset -- the
+// normal case -- builds all of them, so this is inert unless somebody asks for
+// it, and unsetting it is the whole of the way back.
+//
+// It exists because a channel is not cheap: each one is a null sink, six DSP
+// filter nodes and two mix loopbacks, so the idle graph is mostly channels.
+// That is worth nothing on a machine whose session manager can keep up, and a
+// great deal on one that cannot -- SteamOS 3.7 ships a PipeWire that recompiles
+// its match rules for every node on every event, and a full graph pins a core
+// in wireplumber for as long as the daemon is up.
+//
+// An id that is not a default channel is ignored, and a list that selects
+// nothing falls back to all of them: a typo should cost a warning, not a mixer
+// with no channels in it and no clue why.
+std::vector<std::pair<const char *, const char *>> selectedChannels() {
+    const char *want = std::getenv("WAVELINE_CHANNELS");
+    if (!want || !*want) return kDefaultChannels;
+
+    std::vector<std::string> ids;
+    for (const char *p = want; ; ) {
+        const char *comma = std::strchr(p, ',');
+        std::string id(p, comma ? comma - p : std::strlen(p));
+        // Tolerate "system, voice" as readily as "system,voice".
+        const auto first = id.find_first_not_of(" \t");
+        const auto last = id.find_last_not_of(" \t");
+        if (first != std::string::npos) ids.push_back(id.substr(first, last - first + 1));
+        if (!comma) break;
+        p = comma + 1;
+    }
+
+    // kDefaultChannels' order wins, not the variable's: that order is the one
+    // the mixer lays its cards out in.
+    std::vector<std::pair<const char *, const char *>> out;
+    for (const auto &ch : kDefaultChannels) {
+        if (std::find(ids.begin(), ids.end(), ch.first) != ids.end())
+            out.push_back(ch);
+    }
+    if (out.empty()) {
+        fprintf(stderr,
+                "waveline: WAVELINE_CHANNELS='%s' selected no known channel -- "
+                "building all of them\n", want);
+        return kDefaultChannels;
+    }
+    fprintf(stderr, "waveline: WAVELINE_CHANNELS is set -- building %zu of %zu "
+                    "channels:", out.size(), kDefaultChannels.size());
+    for (const auto &ch : out) fprintf(stderr, " %s", ch.first);
+    fprintf(stderr, "\n");
+    return out;
+}
 
 struct MidiMatchParts {
     std::string node;
@@ -507,7 +559,7 @@ bool MixerGraph::build(std::string &error, bool withNoiseSuppression) {
     if (!eng_.addNullSink(kStreamMix, disp("Stream Mix"), 2, error)) return false;
     if (!eng_.addNullSink(kMonitorMix, disp("Monitor Mix"), 2, error)) return false;
 
-    for (const auto &[id, name] : kDefaultChannels) {
+    for (const auto &[id, name] : selectedChannels()) {
         Channel c;
         c.id = id;
         c.name = name;
