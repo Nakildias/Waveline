@@ -36,6 +36,7 @@
 #include <cmath>
 
 #include "aboutwindow.h"
+#include "animatedpanel.h"
 #include "settingswindow.h"
 #include "cardidentity.h"
 #include "channelstrip.h"
@@ -474,21 +475,53 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     routingBannerRows_->setSpacing(6);
     outer->addWidget(routingBanner_);
 
-    auto *body = new QHBoxLayout;
+    auto *bodyWidget = new QWidget(central);
+    auto *body = new QHBoxLayout(bodyWidget);
     body->setContentsMargins(16, 14, 16, 16);
     body->setSpacing(14);
 
-    auto *left = new QVBoxLayout;
+    auto *leftWidget = new QWidget(bodyWidget);
+    auto *left = new QVBoxLayout(leftWidget);
+    left->setContentsMargins(0, 0, 0, 0);
     left->setSpacing(8);
     left->addWidget(caption(tr("Inputs"), central));
     left->addWidget(buildInputs(), 1);
-    left->addSpacing(4);
-    left->addWidget(caption(tr("Outputs"), central));
-    left->addWidget(buildOutputs());
-    body->addLayout(left, 1);
+    auto *outputsContent = new QWidget(central);
+    auto *outputsLayout = new QVBoxLayout(outputsContent);
+    outputsLayout->setContentsMargins(0, 4, 0, 0);
+    outputsLayout->setSpacing(8);
+    outputsLayout->addWidget(caption(tr("Outputs"), outputsContent));
+    outputsLayout->addWidget(buildOutputs());
+    auto *outputsToggle = new PanelEdgeButton(Qt::Vertical, central);
+    outputsToggle->setObjectName(QStringLiteral("toggleOutputsPanel"));
+    auto *outputsPanel = new AnimatedPanel(outputsContent, Qt::Vertical, central);
+    outputsPanel->setObjectName(QStringLiteral("outputsPanel"));
+    left->addWidget(outputsPanel);
+    outputsPanel->setEdgeButton(outputsToggle, leftWidget);
+    const auto updateOutputsToggle = [outputsToggle](bool expanded) {
+        const QString action = expanded ? tr("Collapse outputs") : tr("Expand outputs");
+        outputsToggle->setToolTip(action);
+        outputsToggle->setAccessibleName(action);
+    };
+    const bool outputsExpanded = QSettings().value(QStringLiteral("panels/outputsExpanded"), true).toBool();
+    outputsToggle->setChecked(outputsExpanded);
+    updateOutputsToggle(outputsExpanded);
+    outputsPanel->setExpanded(outputsExpanded, false);
+    connect(outputsToggle, &QAbstractButton::toggled, this,
+            [outputsPanel, updateOutputsToggle](bool expanded) {
+        updateOutputsToggle(expanded);
+        outputsPanel->setExpanded(expanded);
+        QSettings().setValue(QStringLiteral("panels/outputsExpanded"), expanded);
+    });
+    body->addWidget(leftWidget, 1);
     body->addWidget(buildSidebar());
+    auto *settingsPanel = static_cast<AnimatedPanel *>(sidebar_);
+    auto *settingsToggle = static_cast<PanelEdgeButton *>(findChild<QPushButton *>(QStringLiteral("toggleApplicationSettingsPanel")));
+    settingsToggle->setParent(central);
+    settingsToggle->show();
+    settingsPanel->setEdgeButton(settingsToggle, bodyWidget);
 
-    outer->addLayout(body, 1);
+    outer->addWidget(bodyWidget, 1);
     setCentralWidget(central);
 
     setUpdatesEnabled(false);
@@ -560,35 +593,16 @@ QWidget *MainWindow::buildHeader() {
 
     lay->addStretch();
 
-    // One gear, not two dropdowns and an info button.
-    //
-    // Latency and headroom are machine setup -- set once, checked rarely --
-    // and they were taking a third of a bar that also has to fit a status
-    // line, a profile switcher, the tuner and the companion. Everything that
-    // was here is now a tab behind this button, together with the warnings and
-    // the service list, which is where someone goes when audio is misbehaving
-    // anyway. See ui/settingswindow.h.
-    diagnosticsBtn_ = iconButton(QStringLiteral("gear"),
-                                 tr("Latency & Diagnostics: graph latency, "
-                                    "output headroom, warnings, service status "
-                                    "and measured latency per device."),
-                                 bar);
+    diagnosticsBtn_ = new QPushButton(tr("Settings"), bar);
+    diagnosticsBtn_->setToolTip(
+        tr("Graph latency, output headroom, warnings, service status "
+           "and measured latency per device."));
     connect(diagnosticsBtn_, &QPushButton::clicked, this,
             &MainWindow::showLatencyDiagnostics);
     lay->addWidget(diagnosticsBtn_);
     lay->addSpacing(6);
 
-    // One control for profiles, not two. The drop-down beside this button was
-    // a second way to do what the panel behind it already does, and the two
-    // disagreed in the way that matters: the combo switched on a single click,
-    // with the confirmation as the only thing between a mis-click and a live
-    // stream being re-routed. The panel makes switching a deliberate act, and
-    // the name of the loaded profile is no longer worth 150px of a bar
-    // this narrow -- it is on the first row of the panel.
-    manageProfiles_ = new QPushButton(bar);
-    manageProfiles_->setIcon(
-        Theme::icon(QStringLiteral("switch-profile"), Theme::TextDim, 16));
-    manageProfiles_->setFixedSize(38, 30);
+    manageProfiles_ = new QPushButton(tr("Profiles"), bar);
     manageProfiles_->setToolTip(
         tr("Profiles: switch between saved mixer setups, and save, rename, "
            "delete, export and import them."));
@@ -621,8 +635,10 @@ QWidget *MainWindow::buildHeader() {
     connect(aboutBtn_, &QPushButton::clicked, this, &MainWindow::showAbout);
     lay->addWidget(aboutBtn_);
 
-    // No show/hide control for the sidebar: it is narrow enough to leave up
-    // permanently, and a panel that can be hidden is a panel users lose.
+    for (auto *button : {diagnosticsBtn_, manageProfiles_, tunerBtn_,
+                         soundboardBtn_, companionBtn_, aboutBtn_})
+        button->setFixedHeight(32);
+
 
     return bar;
 }
@@ -638,7 +654,9 @@ QWidget *MainWindow::buildInputs() {
     well->setRadius(14);
 
     auto *wellLay = new QVBoxLayout(well);
-    wellLay->setContentsMargins(10, 10, 10, 10);
+    // Padding belongs to the scrollable content, not outside its viewport.
+    // Otherwise the rightmost channel is cut off 10 px before the well edge.
+    wellLay->setContentsMargins(0, 0, 0, 0);
 
     auto *host = new QWidget(well);
     stripHost_ = host;
@@ -648,7 +666,7 @@ QWidget *MainWindow::buildInputs() {
     host->setAcceptDrops(true);
     host->installEventFilter(this);
     stripRow_ = new QHBoxLayout(host);
-    stripRow_->setContentsMargins(0, 0, 0, 0);
+    stripRow_->setContentsMargins(10, 10, 10, 10);
     stripRow_->setSpacing(8);
 
     // Shown while there are no cards, so a stopped daemon leaves an
@@ -1020,7 +1038,26 @@ QWidget *MainWindow::buildSidebar() {
     page->setAutoFillBackground(false);
     sidebarScroll_->setFixedWidth(kSidebarWidth);
 
-    sidebar_ = sidebarScroll_;
+    auto *toggle = new PanelEdgeButton(Qt::Horizontal, this);
+    toggle->setObjectName(QStringLiteral("toggleApplicationSettingsPanel"));
+    auto *panel = new AnimatedPanel(sidebarScroll_, Qt::Horizontal, this);
+    panel->setObjectName(QStringLiteral("applicationSettingsPanel"));
+    sidebar_ = panel;
+    const auto updateToggle = [toggle](bool expanded) {
+        const QString action = expanded ? tr("Collapse Application Settings")
+                                        : tr("Expand Application Settings");
+        toggle->setToolTip(action);
+        toggle->setAccessibleName(action);
+    };
+    const bool expanded = QSettings().value(QStringLiteral("panels/applicationSettingsExpanded"), true).toBool();
+    toggle->setChecked(expanded);
+    updateToggle(expanded);
+    panel->setExpanded(expanded, false);
+    connect(toggle, &QAbstractButton::toggled, this, [panel, updateToggle](bool on) {
+        updateToggle(on);
+        panel->setExpanded(on);
+        QSettings().setValue(QStringLiteral("panels/applicationSettingsExpanded"), on);
+    });
     return sidebar_;
 }
 

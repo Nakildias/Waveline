@@ -1343,11 +1343,6 @@ bool MixerService::start(QString &error) {
     // open and attached. That is a forced quantum transition, and it is the one
     // that leaves a capture resampler in a permanent resync loop.
     //
-    // Missing here, it made the daemon come up broken at 2.7 ms and 5.3 ms and
-    // stay broken until the user changed the setting by hand -- which "fixed"
-    // it only because the interactive path does run the rebuild. 10.7 ms was
-    // always fine on boot because 512 *is* the file default, so there was no
-    // transition to survive. Same fault, same fix, different entry point.
     if (config_.audio().graphQuantum != 0) {
         // Shared so the two attempts can agree: the rebuild must happen once,
         // and the second attempt has to still run it if the first came too
@@ -1368,11 +1363,8 @@ bool MixerService::start(QString &error) {
             // was no transition and skip a rebuild the first one never managed.
             // clock.quantum is what the graph was actually built at and does
             // not move.
-            // Gating on a real transition is also what keeps this from
-            // colliding with the rule in rewire(): a clean start whose stored
-            // quantum already matches the file default gets no rebuild, because
-            // there the graph really is up and working and tearing it down
-            // would be a heal nobody asked for.
+            // Startup also settles once after wiring. This path covers a
+            // later quantum assertion and coalesces with pending recovery.
             const bool transition =
                 clock.known && clock.quantum != 0 && want != clock.quantum;
             if (transition && !*settled) *settled = scheduleCaptureSettle({});
@@ -1442,20 +1434,19 @@ void MixerService::scheduleRewire() {
 
 bool MixerService::scheduleCaptureSettle(const QStringList &masterIds) {
     if (!graph_) return false;
-    if (masterIds.isEmpty()) {
-        for (const auto &bus : graph_->masterBuses())
-            pendingSettleMasters_.insert(QString::fromStdString(bus.id));
-    } else {
-        for (const QString &id : masterIds) {
-            if (!id.isEmpty()) pendingSettleMasters_.insert(id);
+    QStringList ids = masterIds;
+    if (ids.isEmpty()) {
+        for (const auto &bus : graph_->masterBuses()) {
+            if (bus.busType != "midi" && !bus.captureMatch.empty() &&
+                !graph_->findCaptureNode(bus.captureMatch).empty())
+                ids.append(QString::fromStdString(bus.id));
         }
     }
-    if (pendingSettleMasters_.isEmpty()) return false;
-    // Fresh settle: quiet phase first. Restarting the timer cancels an in-flight
-    // quiet wait (single-shot).
+    if (!captureRecovery_.request(ids)) return false;
+    // Preserve unfinished work when restarting the quiet phase. Use this one
+    // timer for every phase so a cancelled batch has no queued singleShot
+    // capable of rebuilding a device before the quiet interval expires.
     settlePass_ = 0;
-    settleBatch_.clear();
-    settleQueue_.clear();
     captureSettleTimer_.setInterval(1500);
     captureSettleTimer_.start();
     return true;
@@ -1734,12 +1725,11 @@ void MixerService::rebuildCaptureHops() {
     // still negotiating (or doing a second recreate after a good hop) is what
     // left C922 "starts fine then robotic".
     if (settlePass_ == 0) {
-        settleBatch_ = pendingSettleMasters_.values();
-        pendingSettleMasters_.clear();
-        settleQueue_.clear();
-        if (settleBatch_.isEmpty()) return;
+        const QStringList &batch = captureRecovery_.beginQuiet();
+        if (batch.isEmpty()) return;
 
-        for (const QString &id : settleBatch_) {
+        for (const QString &id : batch) {
+            graph_->silenceMasterCapture(id.toStdString());
             if (auto *bus = graph_->masterBus(id.toStdString())) {
                 if (!bus->captureNode.empty())
                     engine_.forgetLinksForNode(bus->captureNode);
@@ -1748,28 +1738,20 @@ void MixerService::rebuildCaptureHops() {
         }
         settlePass_ = 1;
         qInfo("waveline: capture quiet for %d master(s), rebuild in 1.2s",
-              static_cast<int>(settleBatch_.size()));
+              static_cast<int>(batch.size()));
         captureSettleTimer_.setInterval(1200);
         captureSettleTimer_.start();
         return;
     }
 
     // Phase 1: one full DSP recreate per master (no second pass).
-    if (settleQueue_.isEmpty()) {
-        for (const QString &id : pendingSettleMasters_) {
-            if (!settleBatch_.contains(id)) settleBatch_.append(id);
-        }
-        pendingSettleMasters_.clear();
-        settleQueue_ = settleBatch_;
-    }
-    if (settleQueue_.isEmpty()) {
+    if (captureRecovery_.empty()) {
         settlePass_ = 0;
-        settleBatch_.clear();
         captureSettleTimer_.setInterval(1500);
         return;
     }
 
-    const QString id = settleQueue_.takeFirst();
+    const QString id = captureRecovery_.takeNext();
     std::string err;
     if (!graph_->rebuildMasterHwCapture(id.toStdString(), err)) {
         qWarning("waveline: capture hop rebuild for %s: %s", qUtf8Printable(id),
@@ -1781,13 +1763,12 @@ void MixerService::rebuildCaptureHops() {
         qInfo("waveline: rebuilt capture hop for master '%s'", qUtf8Printable(id));
     }
 
-    if (!settleQueue_.isEmpty() || !pendingSettleMasters_.isEmpty()) {
-        QTimer::singleShot(50, this, &MixerService::rebuildCaptureHops);
+    if (!captureRecovery_.empty()) {
+        captureSettleTimer_.start(50);
         return;
     }
 
     settlePass_ = 0;
-    settleBatch_.clear();
     captureSettleTimer_.setInterval(1500);
 }
 
@@ -1983,11 +1964,16 @@ void MixerService::rewireGraph() {
                  qUtf8Printable(lastError_));
         rewireTimer_.start(400 * rewireAttempts_);
     } else if (ok) {
-        // Do not scheduleCaptureSettle here. The graph is already linked and
-        // working; a quiet+rebuild pass tears that down for a "heal" nobody
-        // asked for on a clean start. Hotplug uses captureHealOnAppear_.
+        // A linked/running node is not evidence that its capture clock has
+        // settled. Warm up once at startup, then use the same recovery as the
+        // manual Rebuild action. Subsequent ordinary rewires do not repeat it.
+        const bool firstWire = !captureHotplugArmed_;
         captureHotplugArmed_ = true;
         wireCaptureDevicesThatAppeared();
+        if (firstWire) {
+            scheduleCaptureSettle({});
+            qInfo("waveline: initial capture warm-up complete -- scheduling settled rebuild");
+        }
     }
 
     relinkTunerMidi();
@@ -2527,6 +2513,11 @@ void MixerService::updateStreamRouting() {
                         // level lands on the *new* node. See the ladder in the
                         // constructor.
                         scheduleMonitorLevelReassert();
+                        // An output returning can become the graph driver.
+                        // Its capture peers need recovery too, even when none
+                        // of their own registry nodes disappeared.
+                        if (captureHotplugArmed_ && n.name.rfind("alsa_output.", 0) == 0)
+                            scheduleCaptureSettle({});
                         emit Changed();
                     }
                 }
@@ -2604,6 +2595,8 @@ void MixerService::handleHardwareNodeGone(const waveline::PwNode &n) {
             // The path this just recreated is at unity until its level lands
             // on the *new* node. See the ladder in the constructor.
             scheduleMonitorLevelReassert();
+            if (captureHotplugArmed_ && n.name.rfind("alsa_output.", 0) == 0)
+                scheduleCaptureSettle({});
             emit Changed();
         }
     }
