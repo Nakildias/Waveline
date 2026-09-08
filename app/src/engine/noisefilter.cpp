@@ -5,6 +5,7 @@
 
 #include "dspprobe.h"
 #include "filterhost.h"
+#include "frameadapter.h"
 #include "rtsched.h"
 
 #include <pipewire/pipewire.h>
@@ -15,7 +16,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <deque>
 #include <mutex>
 
 namespace waveline {
@@ -53,17 +53,8 @@ struct NoiseFilter::Impl {
     std::atomic<NoiseEngine> engine{NoiseEngine::RnNoise};
     int frame = 480;
 
-    // Audio waiting to be denoised, and denoised audio waiting to be handed
-    // back to PipeWire. Both are needed because the graph quantum is not a
-    // multiple of the engine's frame size.
-    std::deque<float> pending;
-    std::deque<float> ready;
-    // The untouched copy, delayed by exactly the same amount, so the dry/wet
-    // blend stays phase-aligned. Mixing a delayed wet signal against an
-    // undelayed dry one would comb-filter the result.
-    std::deque<float> dry;
-    std::vector<float> scratchIn;
-    std::vector<float> scratchOut;
+    FrameAdapter adapter;
+    bool resetPending = false; // owned by the audio callback
 
     std::atomic<bool> enabled{true};
     std::atomic<float> intensity{1.0f};
@@ -72,9 +63,6 @@ struct NoiseFilter::Impl {
     std::atomic<float> speechProb{0.0f};
     std::atomic<float> inRms{0.0f};
     std::atomic<float> outRms{0.0f};
-    // Primed once enough output has accumulated to cover a full frame of
-    // latency; before that we emit silence rather than stutter.
-    bool primed = false;
 };
 
 namespace {
@@ -99,6 +87,8 @@ void onProcess(void *userdata, spa_io_position *position) {
     if (!out) return;
     if (!in) {  // no input connected yet
         std::memset(out, 0, n * sizeof(float));
+        d->resetPending = true;
+        measureOut(d, out, n);
         return;
     }
 
@@ -123,56 +113,27 @@ void onProcess(void *userdata, spa_io_position *position) {
         // Bypass: copy through, and drop any buffered state so that switching
         // back does not replay stale audio.
         std::memcpy(out, in, n * sizeof(float));
-        if (lk.owns_lock()) {
-            d->pending.clear();
-            d->ready.clear();
-            d->dry.clear();
-            d->primed = false;
-        }
+        // Even when a swap holds the lock, remember to discard pre-bypass
+        // audio on the next successful callback.
+        d->resetPending = true;
         measureOut(d, out, n);
         return;
     }
 
-    for (uint32_t i = 0; i < n; ++i) d->pending.push_back(in[i]);
-
-    // Where the mix is heading. It is walked towards, sample by sample, in the
-    // loop below: applying a new intensity to a whole frame at once steps the
-    // output at the frame boundary, which is the click heard when the strength
-    // slider is dragged while talking.
+    if (d->resetPending) {
+        d->adapter.reset();
+        d->resetPending = false;
+    }
     const float wetTarget = d->intensity.load(std::memory_order_relaxed);
-    const int frame = d->frame;
-    while (static_cast<int>(d->pending.size()) >= frame) {
-        for (int i = 0; i < frame; ++i) {
-            const float sample = d->pending.front();
-            d->scratchIn[i] = sample;
-            d->dry.push_back(sample);
-            d->pending.pop_front();
-        }
-        const float vad = d->denoiser->processFrame(d->scratchIn.data(),
-                                                    d->scratchOut.data());
+    d->adapter.process(in, out, n, [&](const float *frameIn, float *frameOut) {
+        const float vad = d->denoiser->processFrame(frameIn, frameOut);
         d->speechProb.store(vad, std::memory_order_relaxed);
-        for (int i = 0; i < frame; ++i) {
-            const float original = d->dry.front();
-            d->dry.pop_front();
+        for (int i = 0; i < d->frame; ++i) {
             d->wetMix += (wetTarget - d->wetMix) * kWetGlide;
-            d->ready.push_back(d->scratchOut[i] * d->wetMix +
-                               original * (1.0f - d->wetMix));
+            frameOut[i] = frameOut[i] * d->wetMix +
+                          frameIn[i] * (1.0f - d->wetMix);
         }
-    }
-
-    // One frame of slack before output starts, so a quantum larger than the
-    // frame size cannot underrun mid-callback.
-    if (!d->primed && static_cast<int>(d->ready.size()) >= frame) d->primed = true;
-
-    if (!d->primed || d->ready.size() < n) {
-        std::memset(out, 0, n * sizeof(float));
-        measureOut(d, out, n);
-        return;
-    }
-    for (uint32_t i = 0; i < n; ++i) {
-        out[i] = d->ready.front();
-        d->ready.pop_front();
-    }
+    });
     measureOut(d, out, n);
 }
 
@@ -210,15 +171,7 @@ bool NoiseFilter::setEngine(NoiseEngine engine, std::string &error) {
         std::lock_guard<std::mutex> lk(d_->engineLock);
         d_->denoiser = std::move(next);
         d_->frame = frame;
-        d_->scratchIn.assign(frame, 0.0f);
-        d_->scratchOut.assign(frame, 0.0f);
-        // The engines have different latencies, so anything buffered against
-        // the old one would land at the wrong offset against its dry copy and
-        // comb-filter the blend.
-        d_->pending.clear();
-        d_->ready.clear();
-        d_->dry.clear();
-        d_->primed = false;
+        d_->adapter.configure(static_cast<std::size_t>(frame));
     }
     d_->engine.store(engine, std::memory_order_relaxed);
     // The delay this stage adds moved with the engine, so what the diagnostics

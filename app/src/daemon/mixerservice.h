@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "capturerecoveryqueue.h"
+
 #include <QDBusContext>
 #include <QDBusServiceWatcher>
 #include <QObject>
@@ -1162,10 +1164,8 @@ private:
     int monitorLevelPasses_ = 0;
     QTimer midiWireTimer_;
     QTimer captureSettleTimer_;
-    QSet<QString> pendingSettleMasters_;
+    waveline::CaptureRecoveryQueue captureRecovery_;
     QSet<QString> captureHealOnAppear_;
-    QStringList settleQueue_;
-    QStringList settleBatch_;
     int settlePass_ = 0;
     bool captureHotplugArmed_ = false;
     QTimer routeRetryTimer_;
