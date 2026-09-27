@@ -237,10 +237,8 @@ public:
     void setSettings(const CreativeFxSettings &settings);
     // Offsets each modulation LFO's starting phase (~90 degrees) so a stereo
     // pair run through independent processors get free width instead of
-    // moving in lockstep. Set once, right after construction; must not be a
-    // constructor argument because CreativeFxFilter builds its processor
-    // vector with std::vector::assign(count, prototype), which copies one
-    // prototype rather than constructing each element separately.
+    // moving in lockstep. Set once, right after construction, before activating
+    // the filter's audio callback.
     void setChannelIndex(int index);
     void reset();
 

@@ -6,6 +6,7 @@
 #include "dspprobe.h"
 #include "filterhost.h"
 #include "rtsched.h"
+#include "realtimesettings.h"
 
 #include "biquad.h"
 
@@ -14,10 +15,8 @@
 #include <spa/pod/builder.h>
 
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstring>
-#include <mutex>
 #include <vector>
 
 namespace waveline {
@@ -243,9 +242,8 @@ struct EffectsFilter::Impl {
     PortData *outPorts[kMaxChannels]{};
     int channels = 2;
 
-    std::mutex settingsMutex;
-    FxState fx;
-    std::atomic<bool> settingsDirty{true};
+    RealtimeSettings<ChannelFxSettings> pending;
+    FxState fx; // audio-thread owned
     DspMeter meter;
 };
 
@@ -258,15 +256,13 @@ void onProcess(void *userdata, spa_io_position *position) {
 
     float hpMix = 0.0f;
     bool bypass = false;
-    // Lifted out of the state under the lock, so the sample loop below reads
-    // nothing the control thread can be writing.
+    // DSP state belongs to the audio thread; control edits arrive as snapshots.
     int liveCount = 0;
     int liveIdx[kProEqBands]{};
     float liveMix[kProEqBands]{};
     {
-        std::lock_guard<std::mutex> lock(d->settingsMutex);
+        if (d->pending.consume(d->fx.settings)) d->fx.coeffsDirty = true;
         d->fx.advance(d->channels, n);
-        d->settingsDirty.store(false, std::memory_order_relaxed);
         hpMix = d->fx.hpMix;
         liveCount = d->fx.liveBandCount;
         for (int i = 0; i < liveCount; ++i) {
@@ -335,18 +331,14 @@ EffectsFilter::EffectsFilter() : d_(std::make_unique<Impl>()) {}
 EffectsFilter::~EffectsFilter() { stop(); }
 
 void EffectsFilter::setSettings(const ChannelFxSettings &s) {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    d_->fx.settings = s;
-    if (d_->fx.settings.lowCutHz != 80 && d_->fx.settings.lowCutHz != 120)
-        d_->fx.settings.lowCutHz = 80;
-    for (EqBand &b : d_->fx.settings.bands) clampEqBand(b);
-    d_->fx.coeffsDirty = true;
-    d_->settingsDirty.store(true, std::memory_order_relaxed);
+    ChannelFxSettings next = s;
+    if (next.lowCutHz != 80 && next.lowCutHz != 120) next.lowCutHz = 80;
+    for (EqBand &b : next.bands) clampEqBand(b);
+    d_->pending.set(next);
 }
 
 ChannelFxSettings EffectsFilter::settings() const {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    return d_->fx.settings;
+    return d_->pending.get();
 }
 
 bool EffectsFilter::start(const std::string &nodeName, const std::string &description,
@@ -358,6 +350,8 @@ bool EffectsFilter::start(const std::string &nodeName, const std::string &descri
 
     pw_init(nullptr, nullptr);
     d_->channels = channels;
+    d_->fx.ensureChains(channels);
+    d_->pending.set(d_->pending.get());
     // Before the filter is connected, so the audio thread never sees a
     // half-registered meter. See dspprobe.h.
     d_->meter.attach(nodeName, "EQ");

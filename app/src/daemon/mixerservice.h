@@ -14,6 +14,7 @@
 #pragma once
 
 #include "capturerecoveryqueue.h"
+#include "captureoverloadrecovery.h"
 
 #include <QDBusContext>
 #include <QDBusServiceWatcher>
@@ -1079,7 +1080,7 @@ private:
     // rewire, just as hotplug is armed.
     void wireCaptureDevicesThatAppeared();
     void rebuildCaptureHops();
-    void finishMasterCaptureRebuild(const QString &masterId);
+    bool finishMasterCaptureRebuild(const QString &masterId, std::string &error);
     void finishNewMidiMaster(const QString &masterId);
     void finishAllPendingMidi();
     QStringList mastersForCaptureNode(const QString &nodeName) const;
@@ -1164,6 +1165,9 @@ private:
     int monitorLevelPasses_ = 0;
     QTimer midiWireTimer_;
     QTimer captureSettleTimer_;
+    QTimer captureHealthTimer_;
+    std::map<QString, waveline::CaptureOverloadRecovery> captureHealth_;
+    void checkCaptureHealth();
     waveline::CaptureRecoveryQueue captureRecovery_;
     QSet<QString> captureHealOnAppear_;
     int settlePass_ = 0;

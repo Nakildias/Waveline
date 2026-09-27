@@ -3,6 +3,7 @@
 
 #include <QStringList>
 #include <QSet>
+#include <QHash>
 
 namespace waveline {
 
@@ -15,7 +16,10 @@ public:
         for (const auto &id : remaining_) pending_.insert(id);
         remaining_.clear();
         for (const auto &id : ids)
-            if (!id.isEmpty()) pending_.insert(id);
+            if (!id.isEmpty()) {
+                if (!pending_.contains(id)) attempts_.remove(id);
+                pending_.insert(id);
+            }
         return !pending_.isEmpty();
     }
 
@@ -29,9 +33,19 @@ public:
     bool empty() const { return remaining_.isEmpty(); }
     QString takeNext() { return remaining_.takeFirst(); }
 
+    // Keep failed devices in the current batch, without interrupting peers
+    // already waiting. Three total attempts; a later explicit request resets it.
+    bool retry(const QString &id) {
+        if (++attempts_[id] >= 3) { attempts_.remove(id); return false; }
+        if (!remaining_.contains(id)) remaining_.append(id);
+        return true;
+    }
+    void complete(const QString &id) { attempts_.remove(id); }
+
 private:
     QSet<QString> pending_;
     QStringList remaining_;
+    QHash<QString, int> attempts_;
 };
 
 } // namespace waveline

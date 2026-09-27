@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -28,6 +29,11 @@ public:
     void select(std::size_t index);
     void selectSilence();
     static std::string inputPort(std::size_t index);
+
+    struct Health {
+        uint64_t instance = 0, xruns = 0, cycles = 0;
+    };
+    Health health() const;
 
     struct Impl;
 

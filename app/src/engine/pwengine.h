@@ -177,9 +177,6 @@ public:
 
     // Volume and mute on one of our nodes, looked up by node.name.
     bool setNodeVolume(const std::string &nodeName, float volume, bool muted);
-    // Mute flag only. Used on the real output devices at shutdown, where
-    // writing a volume as well would overwrite whatever the user had set.
-    bool setNodeMuted(const std::string &nodeName, bool muted);
 
     // Volume and mute on a PipeWire node by registry id (application streams).
     bool setNodeVolumeById(uint32_t nodeId, float volume, bool muted,

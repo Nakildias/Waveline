@@ -6,14 +6,13 @@
 #include "dspprobe.h"
 #include "filterhost.h"
 #include "rtsched.h"
+#include "realtimesettings.h"
 
 #include <algorithm>
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 
-#include <atomic>
 #include <cstring>
-#include <mutex>
 #include <vector>
 
 namespace waveline {
@@ -43,10 +42,9 @@ struct CreativeFxFilter::Impl {
     PortData *outPorts[kMaxChannels]{};
     int channels = 1;
 
-    std::mutex settingsMutex;
-    CreativeFxSettings settings;
+    RealtimeSettings<CreativeFxSettings> pending;
+    CreativeFxSettings settings; // audio-thread owned
     std::vector<CreativeFxProcessor> processors;
-    std::atomic<bool> settingsDirty{true};
 };
 
 void CreativeFxFilter::filterProcess(void *userdata, spa_io_position *position) {
@@ -54,28 +52,16 @@ void CreativeFxFilter::filterProcess(void *userdata, spa_io_position *position) 
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
 
-    CreativeFxSettings settings;
-    {
-        std::lock_guard<std::mutex> lock(d->settingsMutex);
-        const bool resize = static_cast<int>(d->processors.size()) != d->channels;
-        if (resize) {
-            d->processors.assign(d->channels, CreativeFxProcessor(float(kRate)));
-            for (int i = 0; i < static_cast<int>(d->processors.size()); ++i) {
-                CreativeFxProcessor &p = d->processors[i];
-                p.setChannelIndex(i);
-                p.setSettings(d->settings);
-                p.reset();
-            }
-        } else if (d->settingsDirty.load(std::memory_order_relaxed)) {
-            for (auto &p : d->processors) {
-                p.setSettings(d->settings);
-                p.reset();
-            }
+    const bool wasActive = d->settings.active();
+    if (d->pending.consume(d->settings)) {
+        for (auto &p : d->processors) {
+            p.setSettings(d->settings);
+            // Do not replay audio frozen by a full bypass. Ordinary parameter
+            // edits retain their delay/reverb history instead of wiping it.
+            if (!wasActive && d->settings.active()) p.reset();
         }
-        if (resize || d->settingsDirty.load(std::memory_order_relaxed))
-            d->settingsDirty.store(false, std::memory_order_relaxed);
-        settings = d->settings;
     }
+    const auto &settings = d->settings;
 
     const bool bypass = !settings.active();
 
@@ -149,20 +135,25 @@ CreativeFxFilter::CreativeFxFilter() : d_(std::make_unique<Impl>()) {}
 CreativeFxFilter::~CreativeFxFilter() { stop(); }
 
 void CreativeFxFilter::setSettings(const CreativeFxSettings &s) {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    d_->settings = s;
-    d_->settingsDirty.store(true, std::memory_order_relaxed);
+    d_->pending.set(s);
 }
 
 CreativeFxSettings CreativeFxFilter::settings() const {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    return d_->settings;
+    return d_->pending.get();
 }
 
 bool CreativeFxFilter::start(const std::string &nodeName, const std::string &description,
                              int channels, std::string &error) {
     pw_init(nullptr, nullptr);
     d_->channels = std::clamp(channels, 1, kMaxChannels);
+    // Allocate and touch delay/state buffers before the audio callback runs.
+    d_->processors.clear();
+    d_->processors.reserve(d_->channels);
+    for (int ch = 0; ch < d_->channels; ++ch) {
+        d_->processors.emplace_back(float(kRate));
+        d_->processors.back().setChannelIndex(ch);
+    }
+    d_->pending.set(d_->pending.get());
 
     d_->meter.attach(nodeName, "Creative FX");
 
