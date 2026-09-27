@@ -6,6 +6,7 @@
 #include "dspprobe.h"
 #include "filterhost.h"
 #include "rtsched.h"
+#include "realtimesettings.h"
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
@@ -36,9 +37,10 @@ struct DuckingFilter::Impl {
     PortData *outPorts[kProgramChannels]{};
 
     std::mutex settingsMutex;
-    DuckingSettings settings;
+    DuckingSettings settings; // control-thread routing state
+    RealtimeSettings<DuckingParameters> pending;
+    DuckingParameters active;
     DuckingProcessor processor{48000.0f};
-    std::atomic<bool> settingsDirty{true};
 };
 
 void DuckingFilter::filterProcess(void *userdata, spa_io_position *position) {
@@ -46,19 +48,8 @@ void DuckingFilter::filterProcess(void *userdata, spa_io_position *position) {
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
 
-    DuckingSettings settings;
-    {
-        std::lock_guard<std::mutex> lock(d->settingsMutex);
-        if (d->settingsDirty.load(std::memory_order_relaxed)) {
-            // No reset(): editing the source list or the intensity slider must
-            // not snap the envelope back to unity mid-duck. setSettings() only
-            // recomputes coefficients, so the running gain stays valid and
-            // glides to the new target instead of stepping to it.
-            d->processor.setSettings(d->settings);
-            d->settingsDirty.store(false, std::memory_order_relaxed);
-        }
-        settings = d->settings;
-    }
+    if (d->pending.consume(d->active)) d->processor.setSettings(d->active);
+    const auto &settings = d->active;
 
     const float *sidechains[kMaxDuckingSources]{};
     bool sidechainPresent[kMaxDuckingSources]{};
@@ -103,7 +94,7 @@ DuckingFilter::~DuckingFilter() { stop(); }
 void DuckingFilter::setSettings(const DuckingSettings &s) {
     std::lock_guard<std::mutex> lock(d_->settingsMutex);
     d_->settings = s;
-    d_->settingsDirty.store(true, std::memory_order_relaxed);
+    d_->pending.set(s);
 }
 
 DuckingSettings DuckingFilter::settings() const {

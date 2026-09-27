@@ -31,12 +31,9 @@ void DuckingProcessor::setSampleRate(float rate) {
     rebuild();
 }
 
-void DuckingProcessor::setSettings(const DuckingSettings &settings) {
+void DuckingProcessor::setSettings(const DuckingParameters &settings) {
     settings_ = settings;
     settings_.intensity = clampf(settings_.intensity, 0.0f, 1.0f);
-    if (settings_.sources.size() > kMaxDuckingSources) {
-        settings_.sources.resize(kMaxDuckingSources);
-    }
     rebuild();
 }
 

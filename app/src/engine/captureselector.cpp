@@ -25,6 +25,10 @@ struct CaptureSelector::Impl {
     std::array<void *, kMaxInputs> inputs{};
     void *output = nullptr;
     std::atomic<std::size_t> selected{0};
+    uint64_t instance = 0;
+    std::atomic<uint64_t> xruns{0}, cycles{0};
+    uint64_t previousXrun = 0;
+    uint32_t previousDriver = SPA_ID_INVALID;
 };
 
 namespace {
@@ -37,6 +41,19 @@ void onProcess(void *userdata, spa_io_position *position) {
     if (!out) return;
 
     const std::size_t selected = d->selected.load(std::memory_order_relaxed);
+    if (selected < d->inputs.size()) {
+        // These counters stay available without enabling expensive DSP profiling.
+        const auto &clock = position->clock;
+        if (d->previousDriver == clock.id &&
+            ((clock.flags & SPA_IO_CLOCK_FLAG_XRUN_RECOVER) ||
+             clock.xrun > d->previousXrun))
+            d->xruns.fetch_add(1, std::memory_order_relaxed);
+        d->previousDriver = clock.id;
+        d->previousXrun = clock.xrun;
+        d->cycles.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        d->previousDriver = SPA_ID_INVALID;
+    }
     auto *in = selected < d->inputs.size()
                    ? static_cast<float *>(
                          pw_filter_get_dsp_buffer(d->inputs[selected], n))
@@ -58,8 +75,16 @@ const pw_filter_events kFilterEvents = {
 
 }  // namespace
 
-CaptureSelector::CaptureSelector() : d_(std::make_unique<Impl>()) {}
+CaptureSelector::CaptureSelector() : d_(std::make_unique<Impl>()) {
+    static std::atomic<uint64_t> next{0};
+    d_->instance = next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
 CaptureSelector::~CaptureSelector() { stop(); }
+
+CaptureSelector::Health CaptureSelector::health() const {
+    return {d_->instance, d_->xruns.load(std::memory_order_relaxed),
+            d_->cycles.load(std::memory_order_relaxed)};
+}
 
 std::string CaptureSelector::inputPort(std::size_t index) {
     return "input_" + std::to_string(index);

@@ -14,6 +14,8 @@
 #include <spa/pod/builder.h>
 
 #include <atomic>
+#include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -41,25 +43,28 @@ struct NoiseFilter::Impl {
     pw_filter *filter = nullptr;
     spa_hook listener{};
     DspMeter meter;
-    PortData *inPort = nullptr;
-    PortData *outPort = nullptr;
+    struct Channel {
+        PortData *inPort = nullptr;
+        PortData *outPort = nullptr;
+        std::unique_ptr<Denoiser> denoiser;
+        FrameAdapter adapter;
+        bool resetPending = true;
+        float wetMix = 1.0f;
+    };
+    std::array<Channel, 2> channel;
+    int channels = 1;
 
     // Held for the whole of the DSP section of the callback, and taken by
     // setEngine() while it swaps. The callback try_locks and falls back to
     // passthrough rather than blocking the data thread on a load that can take
     // a second (DeepFilterNet unpacks an ONNX archive).
     std::mutex engineLock;
-    std::unique_ptr<Denoiser> denoiser;
     std::atomic<NoiseEngine> engine{NoiseEngine::RnNoise};
     int frame = 480;
 
-    FrameAdapter adapter;
-    bool resetPending = false; // owned by the audio callback
 
     std::atomic<bool> enabled{true};
     std::atomic<float> intensity{1.0f};
-    // The mix actually in use, chasing `intensity` a sample at a time.
-    float wetMix = 1.0f;
     std::atomic<float> speechProb{0.0f};
     std::atomic<float> inRms{0.0f};
     std::atomic<float> outRms{0.0f};
@@ -67,74 +72,45 @@ struct NoiseFilter::Impl {
 
 namespace {
 
-void measureOut(NoiseFilter::Impl *d, const float *out, uint32_t n) {
-    double acc = 0.0;
-    for (uint32_t i = 0; i < n; ++i) acc += double(out[i]) * out[i];
-    d->outRms.store(n ? float(std::sqrt(acc / n)) : 0.0f,
-                    std::memory_order_relaxed);
-}
-
 void onProcess(void *userdata, spa_io_position *position) {
     auto *d = static_cast<NoiseFilter::Impl *>(userdata);
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
-
-    auto *in = static_cast<float *>(
-        pw_filter_get_dsp_buffer(d->inPort, n));
-    auto *out = static_cast<float *>(
-        pw_filter_get_dsp_buffer(d->outPort, n));
-
-    if (!out) return;
-    if (!in) {  // no input connected yet
-        std::memset(out, 0, n * sizeof(float));
-        d->resetPending = true;
-        measureOut(d, out, n);
-        return;
-    }
-
-    {   // Measured before anything else, so it reflects what really arrived.
-        double acc = 0.0;
-        for (uint32_t i = 0; i < n; ++i) acc += double(in[i]) * in[i];
-        d->inRms.store(n ? float(std::sqrt(acc / n)) : 0.0f,
-                       std::memory_order_relaxed);
-    }
-
-    // Every path below must fall through to the output meter at the end.
-    // Returning early from the bypass branch left it reporting a stale value,
-    // which made an A/B comparison read as if bypass were quieter than the
-    // denoised signal.
-    // A swap is in progress, or the engine failed to build. Either way there is
-    // nothing to denoise with, and passing audio through beats dropping it:
-    // a quantum of untouched microphone is a blip, a quantum of silence is a
-    // dropout the user hears.
     std::unique_lock<std::mutex> lk(d->engineLock, std::try_to_lock);
-    if (!lk.owns_lock() || !d->denoiser ||
-        !d->enabled.load(std::memory_order_relaxed)) {
-        // Bypass: copy through, and drop any buffered state so that switching
-        // back does not replay stale audio.
-        std::memcpy(out, in, n * sizeof(float));
-        // Even when a swap holds the lock, remember to discard pre-bypass
-        // audio on the next successful callback.
-        d->resetPending = true;
-        measureOut(d, out, n);
-        return;
-    }
-
-    if (d->resetPending) {
-        d->adapter.reset();
-        d->resetPending = false;
-    }
+    const bool process = lk.owns_lock() && d->enabled.load(std::memory_order_relaxed);
     const float wetTarget = d->intensity.load(std::memory_order_relaxed);
-    d->adapter.process(in, out, n, [&](const float *frameIn, float *frameOut) {
-        const float vad = d->denoiser->processFrame(frameIn, frameOut);
-        d->speechProb.store(vad, std::memory_order_relaxed);
-        for (int i = 0; i < d->frame; ++i) {
-            d->wetMix += (wetTarget - d->wetMix) * kWetGlide;
-            frameOut[i] = frameOut[i] * d->wetMix +
-                          frameIn[i] * (1.0f - d->wetMix);
+    double inputEnergy = 0, outputEnergy = 0;
+    float speech = 0;
+    for (int ch = 0; ch < d->channels; ++ch) {
+        auto &c = d->channel[ch];
+        auto *in = static_cast<float *>(pw_filter_get_dsp_buffer(c.inPort, n));
+        auto *out = static_cast<float *>(pw_filter_get_dsp_buffer(c.outPort, n));
+        if (!out) { c.resetPending = true; continue; }
+        if (!in) {
+            std::memset(out, 0, n * sizeof(float));
+            c.resetPending = true;
+            continue;
         }
-    });
-    measureOut(d, out, n);
+        for (uint32_t i = 0; i < n; ++i) inputEnergy += double(in[i]) * in[i];
+        if (!process || !c.denoiser) {
+            if (out != in) std::memcpy(out, in, n * sizeof(float));
+            c.resetPending = true;
+        } else {
+            if (c.resetPending) { c.adapter.reset(); c.resetPending = false; }
+            c.adapter.process(in, out, n, [&](const float *frameIn, float *frameOut) {
+                speech = std::max(speech, c.denoiser->processFrame(frameIn, frameOut));
+                for (int i = 0; i < d->frame; ++i) {
+                    c.wetMix += (wetTarget - c.wetMix) * kWetGlide;
+                    frameOut[i] = frameOut[i] * c.wetMix + frameIn[i] * (1.0f - c.wetMix);
+                }
+            });
+        }
+        for (uint32_t i = 0; i < n; ++i) outputEnergy += double(out[i]) * out[i];
+    }
+    const double samples = double(n) * d->channels;
+    d->inRms.store(samples ? float(std::sqrt(inputEnergy / samples)) : 0, std::memory_order_relaxed);
+    d->outRms.store(samples ? float(std::sqrt(outputEnergy / samples)) : 0, std::memory_order_relaxed);
+    d->speechProb.store(speech, std::memory_order_relaxed);
 }
 
 #pragma GCC diagnostic push
@@ -158,21 +134,30 @@ NoiseEngine NoiseFilter::engine() const {
 }
 
 bool NoiseFilter::setEngine(NoiseEngine engine, std::string &error) {
-    if (d_->denoiser && d_->engine.load(std::memory_order_relaxed) == engine)
-        return true;
+    if (d_->channel[0].denoiser &&
+        (d_->channels == 1 || d_->channel[1].denoiser) &&
+        d_->engine.load(std::memory_order_relaxed) == engine) return true;
 
-    // Built before the lock is taken: DeepFilterNet unpacks and loads an ONNX
-    // model here, which is far too slow to hold the audio thread out for.
-    auto next = makeDenoiser(engine, error);
-    if (!next) return false;
-
-    const int frame = next->frameSize();
+    // Build every channel and allocate its frame buffers on the control thread.
+    // A failure leaves the old stereo pair intact; channels never share history.
+    std::array<std::unique_ptr<Denoiser>, 2> next;
+    std::array<FrameAdapter, 2> adapters;
+    int frame = 0;
+    for (int ch = 0; ch < d_->channels; ++ch) {
+        next[ch] = makeDenoiser(engine, error);
+        if (!next[ch]) return false;
+        frame = next[ch]->frameSize();
+        adapters[ch].configure(static_cast<std::size_t>(frame));
+    }
     {
         std::lock_guard<std::mutex> lk(d_->engineLock);
-        d_->denoiser = std::move(next);
+        for (int ch = 0; ch < d_->channels; ++ch) {
+            d_->channel[ch].denoiser.swap(next[ch]);
+            std::swap(d_->channel[ch].adapter, adapters[ch]);
+        }
         d_->frame = frame;
-        d_->adapter.configure(static_cast<std::size_t>(frame));
     }
+    // Old models/buffers are released outside the lock, on this thread.
     d_->engine.store(engine, std::memory_order_relaxed);
     // The delay this stage adds moved with the engine, so what the diagnostics
     // panel quotes has to move with it too -- unless it is switched off, in
@@ -214,7 +199,9 @@ float NoiseFilter::outputRms() const {
 }
 
 bool NoiseFilter::start(const std::string &nodeName, const std::string &description,
-                        std::string &error, bool asSource, NoiseEngine engine) {
+                        std::string &error, bool asSource, NoiseEngine engine, int channels) {
+    if (channels < 1 || channels > 2) { error = "noise filter supports 1 or 2 channels"; return false; }
+    d_->channels = channels;
     pw_init(nullptr, nullptr);
 
     // A saved DeepFilterNet setting must not be able to stop the graph from
@@ -256,8 +243,8 @@ bool NoiseFilter::start(const std::string &nodeName, const std::string &descript
         PW_KEY_NODE_DESCRIPTION, description.c_str(),
         PW_KEY_NODE_AUTOCONNECT, "false",
         "audio.rate", "48000",
-        "audio.channels", "1",
-        "audio.position", "[ MONO ]",
+        "audio.channels", channels == 1 ? "1" : "2",
+        "audio.position", channels == 1 ? "[ MONO ]" : "[ FL FR ]",
         "node.want-driver", "true",
         nullptr);
 
@@ -270,24 +257,23 @@ bool NoiseFilter::start(const std::string &nodeName, const std::string &descript
         return false;
     }
 
-    d_->inPort = static_cast<PortData *>(pw_filter_add_port(
-        d_->filter, PW_DIRECTION_INPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-        sizeof(PortData),
-        pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-                          PW_KEY_PORT_NAME, "input", nullptr),
-        nullptr, 0));
-
-    d_->outPort = static_cast<PortData *>(pw_filter_add_port(
-        d_->filter, PW_DIRECTION_OUTPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS,
-        sizeof(PortData),
-        pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-                          PW_KEY_PORT_NAME, "output", nullptr),
-        nullptr, 0));
-
-    if (!d_->inPort || !d_->outPort) {
-        error = "pw_filter_add_port failed";
-        pw_thread_loop_unlock(d_->loop);
-        return false;
+    for (int ch = 0; ch < channels; ++ch) {
+        auto &c = d_->channel[ch];
+        const char *inName = channels == 1 ? "input" : (ch == 0 ? "input_FL" : "input_FR");
+        const char *outName = channels == 1 ? "output" : (ch == 0 ? "output_FL" : "output_FR");
+        c.inPort = static_cast<PortData *>(pw_filter_add_port(
+            d_->filter, PW_DIRECTION_INPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, sizeof(PortData),
+            pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
+                              PW_KEY_PORT_NAME, inName, nullptr), nullptr, 0));
+        c.outPort = static_cast<PortData *>(pw_filter_add_port(
+            d_->filter, PW_DIRECTION_OUTPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, sizeof(PortData),
+            pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
+                              PW_KEY_PORT_NAME, outName, nullptr), nullptr, 0));
+        if (!c.inPort || !c.outPort) {
+            error = "pw_filter_add_port failed";
+            pw_thread_loop_unlock(d_->loop);
+            return false;
+        }
     }
 
     // Declare the processing latency so downstream consumers can compensate.
@@ -328,7 +314,7 @@ void NoiseFilter::stop() {
     d_->meter.detach();
     // After the loop is gone, so the process callback cannot be holding it.
     std::lock_guard<std::mutex> lk(d_->engineLock);
-    d_->denoiser.reset();
+    for (auto &c : d_->channel) c.denoiser.reset();
 }
 
 }  // namespace waveline

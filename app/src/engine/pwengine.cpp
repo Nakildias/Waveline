@@ -1225,39 +1225,6 @@ bool PwEngine::setNodeVolume(const std::string &nodeName, float volume, bool mut
     return found;
 }
 
-bool PwEngine::setNodeMuted(const std::string &nodeName, bool muted) {
-    if (!running_) return false;
-    pw_thread_loop_lock(d_->loop);
-    uint32_t id = 0;
-    bool found;
-    {
-        std::lock_guard<std::mutex> lock(d_->nodesMutex);
-        found = d_->findNodeIdLocked(nodeName, id);
-    }
-    if (found) {
-        auto *node = static_cast<pw_node *>(
-            pw_registry_bind(d_->registry, id, PW_TYPE_INTERFACE_Node,
-                             PW_VERSION_NODE, 0));
-        if (node) {
-            uint8_t buffer[512];
-            spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-            // Mute alone: no channelVolumes in the object, so the device keeps
-            // the level it was left at.
-            const spa_pod *pod = static_cast<const spa_pod *>(
-                spa_pod_builder_add_object(&b, SPA_TYPE_OBJECT_Props,
-                                           SPA_PARAM_Props, SPA_PROP_mute,
-                                           SPA_POD_Bool(muted)));
-            pw_node_set_param(node, SPA_PARAM_Props, 0, pod);
-            pw_core_sync(d_->core, PW_ID_CORE, 0);
-            pw_proxy_destroy(reinterpret_cast<pw_proxy *>(node));
-        } else {
-            found = false;
-        }
-    }
-    pw_thread_loop_unlock(d_->loop);
-    return found;
-}
-
 bool PwEngine::setNodeVolumeById(uint32_t nodeId, float volume, bool muted,
                                  int channels) {
     if (!running_ || nodeId == 0) return false;

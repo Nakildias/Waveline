@@ -6,13 +6,12 @@
 #include "dspprobe.h"
 #include "filterhost.h"
 #include "rtsched.h"
+#include "realtimesettings.h"
 
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
 
-#include <atomic>
 #include <cstring>
-#include <mutex>
 
 namespace waveline {
 
@@ -34,10 +33,9 @@ struct LufsLimiterFilter::Impl {
     PortData *inPorts[kProgramChannels]{};
     PortData *outPorts[kProgramChannels]{};
 
-    std::mutex settingsMutex;
-    LufsLimiterSettings settings;
+    RealtimeSettings<LufsLimiterSettings> pending;
+    LufsLimiterSettings settings; // audio-thread owned
     LufsLimiterProcessor processor{48000.0f};
-    std::atomic<bool> settingsDirty{true};
 };
 
 void LufsLimiterFilter::filterProcess(void *userdata, spa_io_position *position) {
@@ -45,16 +43,12 @@ void LufsLimiterFilter::filterProcess(void *userdata, spa_io_position *position)
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
 
-    LufsLimiterSettings settings;
-    {
-        std::lock_guard<std::mutex> lock(d->settingsMutex);
-        if (d->settingsDirty.load(std::memory_order_relaxed)) {
-            d->processor.setSettings(d->settings);
-            d->processor.reset();
-            d->settingsDirty.store(false, std::memory_order_relaxed);
-        }
-        settings = d->settings;
+    const bool wasEnabled = d->settings.enabled;
+    if (d->pending.consume(d->settings)) {
+        d->processor.setSettings(d->settings);
+        if (wasEnabled != d->settings.enabled) d->processor.reset();
     }
+    const auto &settings = d->settings;
 
     auto *inL = static_cast<float *>(pw_filter_get_dsp_buffer(d->inPorts[0], n));
     auto *inR = static_cast<float *>(pw_filter_get_dsp_buffer(d->inPorts[1], n));
@@ -89,14 +83,11 @@ LufsLimiterFilter::LufsLimiterFilter() : d_(std::make_unique<Impl>()) {}
 LufsLimiterFilter::~LufsLimiterFilter() { stop(); }
 
 void LufsLimiterFilter::setSettings(const LufsLimiterSettings &s) {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    d_->settings = s;
-    d_->settingsDirty.store(true, std::memory_order_relaxed);
+    d_->pending.set(s);
 }
 
 LufsLimiterSettings LufsLimiterFilter::settings() const {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    return d_->settings;
+    return d_->pending.get();
 }
 
 bool LufsLimiterFilter::start(const std::string &nodeName, const std::string &description,

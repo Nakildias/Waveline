@@ -26,11 +26,13 @@
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QPointer>
+#include <QProcess>
 #include <QRandomGenerator>
 #include <QSet>
 #include <QStandardPaths>
 
 #include <algorithm>
+#include <chrono>
 
 #include <map>
 #include <optional>
@@ -210,6 +212,8 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
 
     // After cold wire / USB appear: disconnect that master's ALSA hop, wait
     // quiet, then one full DSP recreate (second recreate was poisoning good hops).
+    captureHealthTimer_.setInterval(1000);
+    connect(&captureHealthTimer_, &QTimer::timeout, this, &MixerService::checkCaptureHealth);
     captureSettleTimer_.setSingleShot(true);
     captureSettleTimer_.setInterval(1500);
     connect(&captureSettleTimer_, &QTimer::timeout, this,
@@ -259,6 +263,37 @@ MixerService::~MixerService() {
     waveline::FilterHost::stop();
 }
 
+namespace {
+
+// Mute or unmute a real output device the way the desktop's volume control
+// does: through WirePlumber, which writes the device's Route. Writing Props on
+// the ALSA node directly -- what this used to do -- bypasses the Route, and on
+// an ACP device with hardware volume the unmute left the output attenuated far
+// below its slider (a 50% device playing like 10%) until the slider was moved
+// and the Route re-applied. Every Props value read back identical either way,
+// so nothing short of listening showed it.
+bool setOutputMuted(const waveline::PwEngine &engine, const QString &sink,
+                    bool muted) {
+    const std::string name = sink.toStdString();
+    uint32_t id = 0;
+    for (const auto &n : engine.nodes()) {
+        if (n.name == name) {
+            id = n.id;
+            break;
+        }
+    }
+    if (!id) return false;
+    // Waited on: at shutdown this has to land before PipeWire goes away.
+    QProcess wpctl;
+    wpctl.start(QStringLiteral("wpctl"),
+                {QStringLiteral("set-mute"), QString::number(id),
+                 muted ? QStringLiteral("1") : QStringLiteral("0")});
+    return wpctl.waitForFinished(2000) &&
+           wpctl.exitStatus() == QProcess::NormalExit && wpctl.exitCode() == 0;
+}
+
+}  // namespace
+
 void MixerService::muteOutputsForShutdown() {
     Profile &p = config_.live();
     QStringList muted;
@@ -268,7 +303,7 @@ void MixerService::muteOutputsForShutdown() {
         // so there is nothing to protect anyone from and no reason to touch a
         // device the user may have left as they want it.
         if (out.muted) continue;
-        if (!engine_.setNodeMuted(out.sink.toStdString(), true)) continue;
+        if (!setOutputMuted(engine_, out.sink, true)) continue;
         muted << out.sink;
         qInfo("waveline: muted %s for shutdown", qUtf8Printable(out.sink));
     }
@@ -281,7 +316,7 @@ void MixerService::restoreOutputsMutedAtShutdown() {
     Profile &p = config_.live();
     if (p.sinksMutedAtStop.isEmpty()) return;
     for (const QString &sink : p.sinksMutedAtStop) {
-        if (engine_.setNodeMuted(sink.toStdString(), false))
+        if (setOutputMuted(engine_, sink, false))
             qInfo("waveline: unmuted %s after startup", qUtf8Printable(sink));
         else
             qWarning("waveline: could not unmute %s -- device not present",
@@ -1387,6 +1422,8 @@ bool MixerService::start(QString &error) {
 
     hwTimer_.start();
     deadCardTimer_.start();
+    if (qEnvironmentVariable("WAVELINE_AUTO_CAPTURE_RECOVERY") != QLatin1String("0"))
+        captureHealthTimer_.start();
     soundboardReapTimer_.start();
     return true;
 }
@@ -1662,8 +1699,8 @@ void MixerService::finishNewMidiMaster(const QString &masterId) {
     QTimer::singleShot(500, this, [this, masterId] { syncMasterMeters(masterId); });
 }
 
-void MixerService::finishMasterCaptureRebuild(const QString &masterId) {
-    if (!graph_ || masterId.isEmpty()) return;
+bool MixerService::finishMasterCaptureRebuild(const QString &masterId, std::string &error) {
+    if (!graph_ || masterId.isEmpty()) { error = "input disappeared during recovery"; return false; }
     const std::string sid = masterId.toStdString();
     if (const MasterBusState *m = masterBusState(config_.live(), masterId))
         graph_->setMasterSoftwareMonitor(sid, m->softwareMonitor);
@@ -1716,6 +1753,34 @@ void MixerService::finishMasterCaptureRebuild(const QString &masterId) {
     // The published source was torn down and rebuilt above, taking this bus's
     // meter tap with it.
     syncMasterMeters(masterId);
+    if (!ok) error = verifyErr;
+    return ok;
+}
+
+void MixerService::checkCaptureHealth() {
+    if (!graph_) return;
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool recovering = captureSettleTimer_.isActive() || settlePass_ != 0;
+    QStringList affected;
+    QSet<QString> live;
+    for (const auto &bus : graph_->masterBuses()) {
+        const QString id = QString::fromStdString(bus.id);
+        if (!masterHasWave3Hw(id)) continue;
+        live.insert(id);
+        if (!bus.chain.selectorReady || !bus.chain.selector) continue;
+        const auto health = bus.chain.selector->health();
+        if (captureHealth_[id].observe(now, health.instance, health.xruns,
+                                      health.cycles, recovering || bus.captureNode.empty()))
+            affected.append(id);
+    }
+    for (auto it = captureHealth_.begin(); it != captureHealth_.end();) {
+        if (!live.contains(it->first)) it = captureHealth_.erase(it);
+        else ++it;
+    }
+    if (!affected.isEmpty() && scheduleCaptureSettle(affected))
+        qInfo("waveline: Wave:3 capture overload ended; scheduling settled recovery for %s",
+              qUtf8Printable(affected.join(QLatin1String(", "))));
 }
 
 void MixerService::rebuildCaptureHops() {
@@ -1753,18 +1818,28 @@ void MixerService::rebuildCaptureHops() {
 
     const QString id = captureRecovery_.takeNext();
     std::string err;
-    if (!graph_->rebuildMasterHwCapture(id.toStdString(), err)) {
-        qWarning("waveline: capture hop rebuild for %s: %s", qUtf8Printable(id),
-                 err.c_str());
+    bool retry = false;
+    if (!graph_->masterBus(id.toStdString())) {
+        captureRecovery_.complete(id); // removed while recovery was pending
+    } else if (!graph_->rebuildMasterHwCapture(id.toStdString(), err) ||
+               !finishMasterCaptureRebuild(id, err)) {
+        retry = captureRecovery_.retry(id);
+        qWarning("waveline: capture recovery for %s failed%s: %s", qUtf8Printable(id),
+                 retry ? "; retrying after settle" : "; retry limit reached", err.c_str());
+        if (!retry) {
+            lastError_ = tr("Input %1 could not recover after 3 attempts: %2")
+                             .arg(id, QString::fromStdString(err));
+            emit Changed();
+        }
     } else {
-        finishMasterCaptureRebuild(id);
+        captureRecovery_.complete(id);
         captureHealOnAppear_.remove(id);
         if (masterHasWave3Hw(id)) pollMasterHardware(id);
         qInfo("waveline: rebuilt capture hop for master '%s'", qUtf8Printable(id));
     }
 
     if (!captureRecovery_.empty()) {
-        captureSettleTimer_.start(50);
+        captureSettleTimer_.start(retry ? 1500 : 50);
         return;
     }
 

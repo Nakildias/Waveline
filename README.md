@@ -395,6 +395,24 @@ Waveline treats latency as something to control and measure rather than infer.
   cross-correlating a clap; `scripts/latency-sweep.sh` sweeps buffer settings
   and soaks each one.
 
+### Wave:3 recovery under load
+
+Waveline now watches for bursts of missed audio deadlines on Wave:3 capture.
+After at least three observed xrun cycles and five seconds without new xruns,
+it schedules the same settled input rebuild as the hammer button. It waits
+through ongoing overload, ignores startup/manual recovery, and limits automatic
+rebuilds to two per ten minutes with at least a minute between them. A rebuild
+briefly interrupts that input. Failed rebuilds get up to three attempts and
+report an error if they cannot restore the wiring.
+
+This is a recovery aid, not a guarantee of clean audio at 100% CPU or a detector
+for every USB/firmware failure. If crackling happens only under heavy load, try
+**Relaxed (21.3 ms)** latency and check real-time scheduling in Audio diagnostics.
+If distortion persists without recorded xruns, the manual rebuild remains
+available; collect a report before rebuilding to preserve the failure state.
+To disable automatic overload recovery for troubleshooting, set
+`WAVELINE_AUTO_CAPTURE_RECOVERY=0` in the daemon's environment and restart it.
+
 ### Hardware profiles in-tree
 
 | Vendor | Device | Path |

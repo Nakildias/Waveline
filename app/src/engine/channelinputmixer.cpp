@@ -42,12 +42,9 @@ void onProcess(void *userdata, spa_io_position *position) {
     auto *outL = static_cast<float *>(pw_filter_get_dsp_buffer(d->outFl, n));
     auto *outR = static_cast<float *>(pw_filter_get_dsp_buffer(d->outFr, n));
     // Each side is written independently. Requiring *both* buffers before
-    // writing *either* is what silenced every channel the moment the mixer
-    // went into the path: the next stage is RNNoise, which is mono and so
-    // consumes output_FL only, leaving output_FR with no consumer and no
-    // buffer -- and the whole callback returned without writing the left
-    // channel it did have. EffectsFilter and GainFilter both already skip
-    // per channel; this one abandoned the lot.
+    // writing *either* silences a valid left-only or right-only consumer.
+    // Output noise suppression now preserves stereo, but partial consumers
+    // may still exist while ports are connecting or disconnecting.
     if (!outL && !outR) return;
 
     for (uint32_t i = 0; i < n; ++i) {

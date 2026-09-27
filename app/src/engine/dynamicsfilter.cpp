@@ -6,13 +6,12 @@
 #include "dspprobe.h"
 #include "filterhost.h"
 #include "rtsched.h"
+#include "realtimesettings.h"
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
 
-#include <atomic>
 #include <cstring>
-#include <mutex>
 #include <vector>
 
 namespace waveline {
@@ -42,10 +41,9 @@ struct DynamicsFilter::Impl {
     PortData *outPorts[kMaxChannels]{};
     int channels = 1;
 
-    std::mutex settingsMutex;
-    DynamicsSettings settings;
+    RealtimeSettings<DynamicsSettings> pending;
+    DynamicsSettings settings; // audio-thread owned
     std::vector<DynamicsProcessor> processors;
-    std::atomic<bool> settingsDirty{true};
 };
 
 void DynamicsFilter::filterProcess(void *userdata, spa_io_position *position) {
@@ -53,23 +51,10 @@ void DynamicsFilter::filterProcess(void *userdata, spa_io_position *position) {
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
 
-    DynamicsSettings settings;
-    {
-        std::lock_guard<std::mutex> lock(d->settingsMutex);
-        const bool resize = static_cast<int>(d->processors.size()) != d->channels;
-        if (resize) {
-            d->processors.assign(d->channels, DynamicsProcessor(float(kRate)));
-            for (auto &p : d->processors) {
-                p.setSettings(d->settings);
-                p.reset();
-            }
-        } else if (d->settingsDirty.load(std::memory_order_relaxed)) {
-            for (auto &p : d->processors) p.setSettings(d->settings);
-        }
-        if (resize || d->settingsDirty.load(std::memory_order_relaxed))
-            d->settingsDirty.store(false, std::memory_order_relaxed);
-        settings = d->settings;
+    if (d->pending.consume(d->settings)) {
+        for (auto &p : d->processors) p.setSettings(d->settings);
     }
+    const auto &settings = d->settings;
 
     const bool bypass = !settings.active();
 
@@ -103,14 +88,11 @@ DynamicsFilter::DynamicsFilter() : d_(std::make_unique<Impl>()) {}
 DynamicsFilter::~DynamicsFilter() { stop(); }
 
 void DynamicsFilter::setSettings(const DynamicsSettings &s) {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    d_->settings = s;
-    d_->settingsDirty.store(true, std::memory_order_relaxed);
+    d_->pending.set(s);
 }
 
 DynamicsSettings DynamicsFilter::settings() const {
-    std::lock_guard<std::mutex> lock(d_->settingsMutex);
-    return d_->settings;
+    return d_->pending.get();
 }
 
 bool DynamicsFilter::start(const std::string &nodeName, const std::string &description,
@@ -122,6 +104,14 @@ bool DynamicsFilter::start(const std::string &nodeName, const std::string &descr
 
     pw_init(nullptr, nullptr);
     d_->channels = channels;
+    // Allocate and touch delay/state buffers before the audio callback runs.
+    d_->processors.clear();
+    d_->processors.reserve(d_->channels);
+    for (int ch = 0; ch < d_->channels; ++ch) {
+        d_->processors.emplace_back(float(kRate));
+    }
+    d_->pending.set(d_->pending.get());
+
 
     d_->meter.attach(nodeName, "Dynamics");
 

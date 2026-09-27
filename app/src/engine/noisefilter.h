@@ -55,8 +55,9 @@ public:
     NoiseFilter(const NoiseFilter &) = delete;
     NoiseFilter &operator=(const NoiseFilter &) = delete;
 
-    // `sourceName` is the node the filter takes audio from, normally the
-    // microphone capture node. Runs on its own thread loop.
+    // Mono for microphone paths, stereo for application output chains. Stereo
+    // channels have independent model/frame state, including in bypass.
+    // Uses the shared FilterHost connection and data loops.
     // asSource publishes the node as an Audio/Source so applications can pick
     // it as a recording device. Off by default: the per-channel filters are
     // internal plumbing and listing all twenty of them buries the one source a
@@ -66,7 +67,7 @@ public:
     // machine where it is not installed.
     bool start(const std::string &nodeName, const std::string &description,
                std::string &error, bool asSource = false,
-               NoiseEngine engine = NoiseEngine::RnNoise);
+               NoiseEngine engine = NoiseEngine::RnNoise, int channels = 1);
     void stop();
 
     // Bypass keeps the node and its links in place and just stops denoising,

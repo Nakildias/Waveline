@@ -26,10 +26,10 @@ struct DuckingSourceRef {
     bool operator!=(const DuckingSourceRef &o) const { return !(*this == o); }
 };
 
-struct DuckingSettings {
+// Audio parameters exclude routing strings/vectors: safe to copy in a callback.
+struct DuckingParameters {
     bool enabled = false;
     float intensity = 0.75f;
-    std::vector<DuckingSourceRef> sources;
     float thresholdDb = -32.0f;
     float depthDb = -18.0f;
     float attackSec = 0.10f;
@@ -40,6 +40,10 @@ struct DuckingSettings {
     // starts letting go. Pauses between words do not lift the program audio.
     float holdSec = 3.0f;
 
+};
+
+struct DuckingSettings : DuckingParameters {
+    std::vector<DuckingSourceRef> sources;
     bool active() const { return enabled && !sources.empty(); }
 };
 
@@ -48,7 +52,7 @@ public:
     explicit DuckingProcessor(float sampleRate = 48000.0f);
 
     void setSampleRate(float rate);
-    void setSettings(const DuckingSettings &settings);
+    void setSettings(const DuckingParameters &settings);
     void reset();
 
     void process(float *left, float *right,
@@ -63,7 +67,7 @@ private:
     static float smoothCoeff(float timeSec, float sampleRate);
 
     float sampleRate_ = 48000.0f;
-    DuckingSettings settings_{};
+    DuckingParameters settings_{};
 
     float sidechainEnv_ = 0.0f;
     float gain_ = 1.0f;

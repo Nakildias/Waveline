@@ -319,4 +319,14 @@ if(BUILD_TESTING)
     target_include_directories(waveline-audio-recovery-test PRIVATE src)
     target_link_libraries(waveline-audio-recovery-test PRIVATE Qt6::Core)
     add_test(NAME audio-recovery COMMAND waveline-audio-recovery-test)
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_executable(waveline-stereo-graph-test tests/stereo_graph_test.cpp)
+        target_link_libraries(waveline-stereo-graph-test PRIVATE wavelineengine)
+        add_test(NAME stereo-graph COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/isolated_pipewire_test.py"
+            $<TARGET_FILE:waveline-stereo-graph-test>)
+        set_tests_properties(stereo-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    endif()
 endif()

@@ -491,7 +491,7 @@ bool MixerGraph::startChannelChain(const std::string &id, const std::string &lab
     chain.outputNc = std::make_unique<NoiseFilter>();
     if (chain.outputNc->start(ncNodeName(id, FxStage::Output),
                               disp(label + " Output NC"), outNcErr,
-                              false, engine_)) {
+                              false, engine_, 2)) {
         chain.outputNcReady = true;
         chain.outputNc->setEnabled(false);
     } else {
@@ -875,10 +875,7 @@ bool MixerGraph::rebuildMasterHwCapture(const std::string &id, std::string &erro
     eng_.sync();
 
     if (!createMasterChainNodes(*bus, wantNc, error)) return false;
-    {
-        std::string srcErr;
-        createMasterVirtualSource(*bus, srcErr);
-    }
+    if (!createMasterVirtualSource(*bus, error)) return false;
     if (!wireMasterPaths(id, error)) return false;
     if (bus->chain.gainReady && bus->chain.gain)
         bus->chain.gain->setGain(preservedGain);
@@ -1658,8 +1655,10 @@ bool MixerGraph::wireChannelFx(const std::string &channelId, std::string &error)
         const bool useMixer =
             chain.mixerReady && eng_.hasPort(mixNode, "input_FL", false);
         const bool hasOutNc =
-            chain.outputNcReady && eng_.hasPort(outNcNode, "input", false) &&
-            eng_.hasPort(outNcNode, "output", true);
+            chain.outputNcReady && eng_.hasPort(outNcNode, "input_FL", false) &&
+            eng_.hasPort(outNcNode, "input_FR", false) &&
+            eng_.hasPort(outNcNode, "output_FL", true) &&
+            eng_.hasPort(outNcNode, "output_FR", true);
         const bool hasOutFx =
             chain.outputFxReady && eng_.hasPort(outFxNode, "input_FL", false) &&
             eng_.hasPort(outFxNode, "output_FL", true);
@@ -1692,11 +1691,12 @@ bool MixerGraph::wireChannelFx(const std::string &channelId, std::string &error)
         if (!useMixOut) anchored = true;
 
         if (hasOutNc) {
-            const std::string ncIn = pathOutMono ? pathOutPortL : pathOutPortL;
-            if (tryLink(pathOutNode, ncIn, outNcNode, "input")) {
+            if (tryLink(pathOutNode, pathOutPortL, outNcNode, "input_FL") &&
+                tryLink(pathOutNode, pathOutPortR, outNcNode, "input_FR")) {
                 pathOutNode = outNcNode;
-                pathOutPortL = pathOutPortR = "output";
-                pathOutMono = true;
+                pathOutPortL = "output_FL";
+                pathOutPortR = "output_FR";
+                pathOutMono = false;
             }
         }
 
@@ -2226,7 +2226,7 @@ bool MixerGraph::ensureChannelNoiseFilter(const std::string &channelId, FxStage 
     chain.outputNc = std::make_unique<NoiseFilter>();
     if (!chain.outputNc->start(ncNodeName(channelId, FxStage::Output),
                                disp(c->name + " Output NC"), err,
-                               false, engine_)) {
+                               false, engine_, 2)) {
         chain.outputNc.reset();
         return false;
     }
@@ -2742,7 +2742,7 @@ bool MixerGraph::ensureChannelFilters(std::string &error) {
             std::string ncErr;
             if (chain.outputNc->start(ncNodeName(c.id, FxStage::Output),
                                       disp(c.name + " Output NC"), ncErr,
-                                      false, engine_)) {
+                                      false, engine_, 2)) {
                 chain.outputNcReady = true;
                 chain.outputNc->setEnabled(false);
             } else {
