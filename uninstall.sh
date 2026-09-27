@@ -106,6 +106,9 @@ dkms remove -m "Arch Linux" -v "$DKMS_VER" --all >/dev/null 2>&1
 rm -rf "/usr/src/Arch Linux-$DKMS_VER"
 [[ $REMOVED_DKMS -eq 1 ]] && { depmod -a "$KREL" && ok "depmod updated"; } \
                           || ok "no DKMS module of ours was installed"
+# Kernel tarballs kept by dkms-stage.sh for rebuilds on kernel updates.
+[[ -d /var/cache/waveline ]] && rm -rf /var/cache/waveline \
+  && ok "removed /var/cache/waveline"
 
 # ------------------------------------------------- remove the DKMS-free module
 # The atomic path: a module in /var and a boot unit that swaps it in. Checked
