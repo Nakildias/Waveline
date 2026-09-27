@@ -18,6 +18,10 @@
 # -- which is how you build for a device that is currently unplugged, and how
 # install.sh passes down what it already detected.
 #
+# WAVELINE_SRC and WAVELINE_CACHE move the staged tree (default ./src) and the
+# tarball cache (default ./.build). The DKMS package uses both: it stages into
+# its own build directory and caches in /var/cache/waveline.
+#
 # With no profile contributing a patch this stages a pristine sound/usb/ and
 # says so. That is a legitimate outcome, not a failure: most microphones need
 # no kernel change at all.
@@ -30,8 +34,8 @@ KMAJ="${KVER%%.*}"                       # -> 7
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WAVELINE_ROOT="$ROOT"
-BUILDDIR="$ROOT/.build"
-SRC="$ROOT/src"
+BUILDDIR="${WAVELINE_CACHE:-$ROOT/.build}"
+SRC="${WAVELINE_SRC:-$ROOT/src}"
 KBUILD="/usr/lib/modules/$KREL/build"
 TARBALL="linux-$KVER.tar.xz"
 KURL="https://cdn.kernel.org/pub/linux/kernel/v${KMAJ}.x"

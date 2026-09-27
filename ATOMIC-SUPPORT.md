@@ -324,11 +324,12 @@ packages, and there is nothing to roll back.
 - **No Flatpak.** `wavelined` owns a PipeWire graph, opens a usbfs control
   endpoint on devices that have one, and runs as a systemd user unit. A sandbox
   is the wrong shape for it.
-- **No automatic rebuild after a kernel update.** The same reason
-  `AUTOINSTALL="no"` is set in [`dkms/dkms.conf`](dkms/dkms.conf): the module is
-  a snapshot of one kernel's `sound/usb` tree with patches whose anchors are
-  checked against that kernel. Rebuilding it unattended against a newer one is
-  not safe, and falling back to the stock driver is the correct outcome.
+- **No automatic rebuild after a kernel update.** DKMS does this on a mutable
+  system, re-staging the new kernel's `sound/usb` and re-applying the patches
+  in [`dkms/dkms-stage.sh`](dkms/dkms-stage.sh). An atomic update has no such
+  hook: the new image is only running after a reboot, and the boot unit is not
+  the place for a multi-minute download and compile. Until the rebuild, the
+  stock driver is used, which is the correct outcome.
 
 ---
 

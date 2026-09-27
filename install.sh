@@ -123,7 +123,9 @@ changes (the daemon is left running).
 The --kernel-only path does nothing but rebuild the patched snd-usb-audio for
 the running kernel and install it. This is what to run after a kernel update
 on an atomic distro, where the module is carried in /var and does not survive
-one; `sudo waveline-kmod rebuild` is the same thing by another name.
+one; `sudo waveline-kmod rebuild` is the same thing by another name. With
+DKMS the rebuild happens by itself when the new kernel is installed; run this
+only if that failed (no network at the time, or a patch no longer applies).
 
 Environment variables (full install):
   WAVELINE_PROFILES="wave3"   Install a profile without the device plugged in
@@ -677,6 +679,15 @@ kbuild() {
 	[[ -d "/lib/modules/$KREL/build" ]]     && { echo "/lib/modules/$KREL/build"; return; }
 }
 
+# A kernel built with Clang (CachyOS, some -lto kernels) records LLVM-only
+# flags in its kbuild tree -- -mretpoline-external-thunk, -mllvm and friends --
+# and gcc dies on the first one. Kbuild wants LLVM=1 to pick the matching
+# toolchain. DKMS works this out for itself; our own `make` calls do not.
+kbuild_is_clang() {
+	grep -qs '^CONFIG_CC_IS_CLANG=y' "$1/.config" \
+	  || grep -qs '^CONFIG_CC_IS_CLANG=y' "$1/include/config/auto.conf"
+}
+
 # Is the snd-usb-audio already in the kernel a different build from the one
 # modprobe would load now?
 #
@@ -770,6 +781,10 @@ arch)
 	# `rust` and `rustup` conflict, so only ask for one when neither is
 	# already providing cargo. Someone who set up rustup themselves keeps it.
 	[[ -n "$CARGO" ]] || PKGS+=(rust)
+	# A Clang-built kernel (CachyOS) needs the LLVM toolchain for its modules.
+	# Asked of /proc/version, not the kbuild tree: the headers may be among
+	# the packages this very command is about to install.
+	grep -qs 'clang version' /proc/version && PKGS+=(clang llvm lld)
 	ok "pacman -S ${PKGS[*]}"
 	# Deliberately NO -y: "pacman -Sy <pkg>" is a partial upgrade and can break
 	# an Arch system. If the local DB is too old to find a package, tell the
@@ -1026,7 +1041,9 @@ kernel_patch_atomic() {
 		[ -d "$kb" ] || kb="$(ls -d /usr/src/kernels/*/ 2>/dev/null | head -1)"
 		[ -n "$kb" ] && [ -d "$kb" ] || { echo "no kernel build directory" >&2; exit 1; }
 		echo "using $kb"
-		exec make -C "$kb" M='"$ROOT"'/src modules' >/tmp/waveline-build.log 2>&1; then
+		llvm=
+		grep -qs "^CONFIG_CC_IS_CLANG=y" "$kb/.config" "$kb/include/config/auto.conf" && llvm=LLVM=1
+		exec make -C "$kb" M='"$ROOT"'/src $llvm modules' >/tmp/waveline-build.log 2>&1; then
 		warn "build failed -- see /tmp/waveline-build.log"
 		warn "  either the patch anchors do not match kernel $KREL, or the build"
 		warn "  environment has no headers for it. On an image-based system the"
@@ -1073,10 +1090,15 @@ else
 	# WAVELINE_PROFILES is passed explicitly rather than letting prepare-src.sh
 	# detect again: it must patch for exactly the set decided above, including
 	# a set that was forced on the command line.
-	if WAVELINE_PROFILES="$DETECTED" bash "$ROOT/scripts/prepare-src.sh" \
-	     >/tmp/waveline-prepare.log 2>&1; then
+	#
+	# The tarball cache is DKMS's (see dkms/dkms-stage.sh), so the DKMS build
+	# below finds this download already there instead of fetching it again.
+	if WAVELINE_PROFILES="$DETECTED" WAVELINE_CACHE=/var/cache/waveline \
+	     bash "$ROOT/scripts/prepare-src.sh" >/tmp/waveline-prepare.log 2>&1; then
 		ok "kernel sources staged and patched"
-		if make -C "$KB" M="$ROOT/src" modules >/tmp/waveline-build.log 2>&1; then
+		KMAKE=(make -C "$KB" M="$ROOT/src")
+		kbuild_is_clang "$KB" && KMAKE+=(LLVM=1)
+		if "${KMAKE[@]}" modules >/tmp/waveline-build.log 2>&1; then
 			ok "module built"
 			dkms remove -m "$DKMS_NAME" -v "$DKMS_VER" --all >/dev/null 2>&1
 			# The pre-rename package, from an install that predates Waveline.
@@ -1092,14 +1114,24 @@ else
 			# `dkms install Linux/1.0` and fails.
 			dkms remove -m "Arch Linux" -v "$DKMS_VER" --all >/dev/null 2>&1
 			rm -rf "/usr/src/Arch Linux-$DKMS_VER"
-			DEST="/usr/src/$DKMS_NAME-$DKMS_VER"; rm -rf "$DEST"; mkdir -p "$DEST"
-			cp -a "$ROOT/src"/. "$DEST"/; cp -a "$ROOT/dkms/dkms.conf" "$DEST"/
+			# The package carries no kernel sources, only what it takes to
+			# stage them: on every build, including the automatic one after a
+			# kernel update, dkms-stage.sh fetches that kernel's sound/usb and
+			# applies the patches for the profiles recorded here.
+			DEST="/usr/src/$DKMS_NAME-$DKMS_VER"; rm -rf "$DEST"; mkdir -p "$DEST/scripts/lib"
+			cp -a "$ROOT/dkms/dkms.conf" "$ROOT/dkms/dkms-stage.sh" "$DEST"/
+			chmod 755 "$DEST/dkms-stage.sh"
+			cp -a "$ROOT/scripts/prepare-src.sh" "$ROOT/scripts/patches" "$DEST/scripts"/
+			cp -a "$ROOT/scripts/lib/profiles.sh" "$DEST/scripts/lib"/
+			cp -a "$ROOT/devices" "$DEST"/
+			printf '%s\n' $DETECTED > "$DEST/profiles"
 			if dkms add -m "$DKMS_NAME" -v "$DKMS_VER" >/dev/null 2>&1 &&
 			   dkms build -m "$DKMS_NAME" -v "$DKMS_VER" -k "$KREL" >/dev/null 2>&1 &&
 			   dkms install -m "$DKMS_NAME" -v "$DKMS_VER" -k "$KREL" --force >/dev/null 2>&1; then
-				ok "installed via dkms"
+				ok "installed via dkms (rebuilt automatically on kernel updates)"
 			else
-				warn "dkms install failed"; FAILED_KERNEL=1
+				warn "dkms install failed -- see /var/lib/dkms/$DKMS_NAME/$DKMS_VER/build/make.log"
+				FAILED_KERNEL=1
 			fi
 		else
 			warn "build failed -- see /tmp/waveline-build.log"
