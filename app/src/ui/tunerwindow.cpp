@@ -21,6 +21,7 @@
 
 #include "levelmeter.h"
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -331,6 +332,7 @@ TunerWindow::TunerWindow(MixerClient *client, QWidget *parent)
 
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(16, 16, 16, 16);
+    Monarchy::WindowChrome::adopt(this, outer);
 
     auto *card = new CardBase(this);
     card->setFillColor(Theme::Card);
@@ -349,7 +351,7 @@ TunerWindow::TunerWindow(MixerClient *client, QWidget *parent)
     line->setFrameShadow(QFrame::Plain);
     line->setFixedHeight(1);
     line->setStyleSheet(
-        QStringLiteral("background: %1; border: none;").arg(Theme::Line.name()));
+        QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
     lay->addWidget(line);
 
     dial_ = new TunerDial(card);

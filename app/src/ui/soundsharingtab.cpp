@@ -22,10 +22,14 @@
 #include <QVBoxLayout>
 
 #include "mixerclient.h"
+#include "monarchy/desktop.h"
 #include "theme.h"
 #include "widgets.h"
 
 namespace {
+
+// The application icon beside each name, on Monarchy.
+constexpr int kAppIconPx = 18;
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
@@ -46,7 +50,7 @@ QWidget *makeVolumeRow(QWidget *parent, TrackSlider **outSlider, QLabel **outPct
     auto *slider = new TrackSlider(row);
     slider->setRange(0, maxPct);
     slider->setValue(int(value * 100.0 + 0.5));
-    slider->setAccent(enabled ? accent : Theme::Line);
+    slider->setAccent(enabled ? accent : Theme::Inactive);
     slider->setEnabled(enabled);
     slider->setToolTip(tip);
     if (!enabled) slider->setCursor(Qt::ArrowCursor);
@@ -76,6 +80,7 @@ struct SharedAppInfo {
     double level = 1.0;
     double volume = 1.0;
     QString channelId;
+    QString icon;     // the launcher entry's Icon=, empty when unknown
 };
 
 SoundSharingTab::SoundSharingTab(MixerClient *client, QWidget *parent)
@@ -184,9 +189,11 @@ void SoundSharingTab::refresh() {
 
     QHash<uint, double> volumes;
     QHash<uint, QString> routed;
+    QHash<uint, QString> icons;
     for (const auto &a : client_->apps()) {
         routed.insert(a.nodeId, a.channelId);
         volumes.insert(a.nodeId, a.volume);
+        icons.insert(a.nodeId, a.icon);
     }
 
     QList<SharedAppInfo> apps;
@@ -200,6 +207,7 @@ void SoundSharingTab::refresh() {
         if (f.size() > 3) a.level = f[3].toDouble();
         a.volume = volumes.value(a.nodeId, 1.0);
         a.channelId = routed.value(a.nodeId);
+        a.icon = icons.value(a.nodeId);
         apps.append(a);
     }
 
@@ -210,9 +218,9 @@ void SoundSharingTab::refresh() {
     QString sig = targets.join(QLatin1Char('|')) + QLatin1Char('#');
     for (const auto &c : channels) sig += c.id + QLatin1Char(',');
     for (const auto &a : apps)
-        sig += QStringLiteral("%1:%2:%3:%4;")
+        sig += QStringLiteral("%1:%2:%3:%4:%5;")
                    .arg(a.nodeId)
-                   .arg(a.name, a.target, a.channelId);
+                   .arg(a.name, a.target, a.channelId, a.icon);
     // The sliders and badges here are drawn in their channel's colour, and a
     // recolour changes nothing else in this signature.
     sig += QStringLiteral("looks%1").arg(Theme::cardLooksRevision());
@@ -232,7 +240,26 @@ void SoundSharingTab::refresh() {
         auto *cl = new QVBoxLayout(cell);
         cl->setContentsMargins(2, 4, 2, 4);
         cl->setSpacing(4);
-        cl->addWidget(new QLabel(a.name, cell));
+        if (Monarchy::isActive()) {
+            // On Monarchy, the application's own icon to the left of its name,
+            // from the desktop's icon theme. The universal look stays text
+            // only: with no known theme to resolve against, some rows would
+            // have an icon and some a gap.
+            auto *nameRow = new QHBoxLayout;
+            nameRow->setContentsMargins(0, 0, 0, 0);
+            nameRow->setSpacing(6);
+            auto *iconLabel = new QLabel(cell);
+            // Held at its size even without an icon, so every name starts at
+            // the same place.
+            iconLabel->setFixedSize(kAppIconPx, kAppIconPx);
+            const QIcon icon = Monarchy::appIcon(a.icon);
+            if (!icon.isNull()) iconLabel->setPixmap(icon.pixmap(kAppIconPx, kAppIconPx));
+            nameRow->addWidget(iconLabel);
+            nameRow->addWidget(new QLabel(a.name, cell), 1);
+            cl->addLayout(nameRow);
+        } else {
+            cl->addWidget(new QLabel(a.name, cell));
+        }
 
         const uint nodeId = a.nodeId;
         const QColor channelAccent = Theme::channelColor(a.channelId);
@@ -252,7 +279,7 @@ void SoundSharingTab::refresh() {
 
         const bool shared = !a.target.isEmpty();
         const QColor shareAccent =
-            shared ? Theme::channelColor(a.target) : Theme::Line;
+            shared ? Theme::channelColor(a.target) : Theme::Inactive;
         TrackSlider *shareSlider = nullptr;
         QLabel *sharePct = nullptr;
         cl->addWidget(makeVolumeRow(
@@ -274,7 +301,7 @@ void SoundSharingTab::refresh() {
             sep->setFrameShadow(QFrame::Plain);
             sep->setFixedHeight(1);
             sep->setStyleSheet(
-                QStringLiteral("background: %1; border: none;").arg(Theme::Line.name()));
+                QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
             cl->addSpacing(2);
             cl->addWidget(sep);
         }

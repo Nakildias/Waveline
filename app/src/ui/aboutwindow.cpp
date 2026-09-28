@@ -18,6 +18,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "version.h"
 #include "widgets.h"
@@ -127,6 +128,7 @@ AboutWindow::AboutWindow(QWidget *parent)
 
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(16, 16, 16, 16);
+    Monarchy::WindowChrome::adopt(this, outer);
 
     auto *card = new CardBase(this);
     card->setFillColor(Theme::Card);
@@ -194,7 +196,7 @@ AboutWindow::AboutWindow(QWidget *parent)
     line->setFrameShadow(QFrame::Plain);
     line->setFixedHeight(1);
     line->setStyleSheet(
-        QStringLiteral("background: %1; border: none;").arg(Theme::Line.name()));
+        QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
     line->setFixedWidth(380);
     lay->addWidget(line, 0, Qt::AlignHCenter);
 

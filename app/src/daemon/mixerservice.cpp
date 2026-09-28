@@ -6480,6 +6480,7 @@ struct ListedApp {
     uint32_t nodeId = 0;
     std::string name;
     std::string channel;
+    std::string icon;   // the launcher entry's Icon=, empty when none was found
 };
 
 std::vector<ListedApp> mergedPlaybackApps(const waveline::PwEngine &engine,
@@ -6492,6 +6493,7 @@ std::vector<ListedApp> mergedPlaybackApps(const waveline::PwEngine &engine,
         ListedApp &e = merged[waveline::appMergeKey(n)];
         if (e.nodeId == 0 || n.id < e.nodeId) e.nodeId = n.id;
         e.name = name;
+        if (e.icon.empty()) e.icon = waveline::appIconName(n);
         if (router) {
             const std::string ch = router->assignedChannel(n);
             if (!ch.empty()) e.channel = ch;
@@ -6666,10 +6668,13 @@ QStringList MixerService::Apps() const {
     QStringList out;
     for (const ListedApp &row : mergedPlaybackApps(engine_, router_.get())) {
         const QString name = QString::fromStdString(row.name);
-        out << QStringLiteral("%1\t%2\t%3\t%4")
+        // The icon last, so a reader that knows only the first four fields --
+        // the companion page -- is unaffected.
+        out << QStringLiteral("%1\t%2\t%3\t%4\t%5")
                    .arg(row.nodeId)
                    .arg(name, QString::fromStdString(row.channel))
-                   .arg(appVolumeForName(name));
+                   .arg(appVolumeForName(name))
+                   .arg(QString::fromStdString(row.icon));
     }
     return out;
 }

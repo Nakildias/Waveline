@@ -22,22 +22,46 @@ namespace Theme {
 // ------------------------------------------------------------------ palette
 // Near-black rather than pure black: an OLED-black panel next to a dark grey
 // card reads as a rendering fault, not as depth.
-inline const QColor Bg            {0x12, 0x12, 0x14};  // window
-inline const QColor Well          {0x0c, 0x0c, 0x0e};  // recessed areas
-inline const QColor Card          {0x1e, 0x1e, 0x22};  // channel cards, panels
-inline const QColor CardHover     {0x26, 0x26, 0x2b};
-inline const QColor Line          {0x2e, 0x2e, 0x34};  // hairline separators
-inline const QColor Text          {0xe8, 0xe8, 0xec};
-inline const QColor TextDim       {0x9a, 0x9a, 0xa4};
-inline const QColor TextFaint     {0x66, 0x66, 0x70};  // section captions
-inline const QColor Accent        {0x3d, 0xd6, 0x8c};  // "on", signal present
-inline const QColor AccentDim     {0x24, 0x7f, 0x54};
+// Not const: on Monarchy the surfaces become washes over the window's tint,
+// and in its light scheme the whole set is swapped for a light one -- see
+// apply(). The values here are the universal look's, which is always dark.
+inline QColor Bg                  {0x12, 0x12, 0x14};  // window
+inline QColor Well                {0x0c, 0x0c, 0x0e};  // recessed areas
+inline QColor Card                {0x1e, 0x1e, 0x22};  // channel cards, panels
+inline QColor CardHover           {0x26, 0x26, 0x2b};
+// Tooltips, which are windows of their own with no tint behind them: solid.
+inline QColor Popup               {0x1e, 0x1e, 0x22};
+inline QColor Line                {0x2e, 0x2e, 0x34};  // hairline separators
+// Greyed out: the colour a disconnected card, an idle meter or an unshared
+// slider wears in place of its own. Solid, unlike Line in the light scheme,
+// which is a dark wash -- an accent's alpha is set by what draws it, and a
+// wash made opaque is black.
+inline QColor Inactive            {0x2e, 0x2e, 0x34};
+inline QColor Text                {0xe8, 0xe8, 0xec};
+inline QColor TextDim             {0x9a, 0x9a, 0xa4};
+inline QColor TextFaint           {0x66, 0x66, 0x70};  // section captions
+// The two warning bars' grounds: a daemon that is down, an application
+// somebody else keeps moving. Dark tints of red and amber, light ones in the
+// light scheme, so the text on them stays readable either way.
+inline QColor DangerGround        {0x4a, 0x1d, 0x1d};
+inline QColor WarnGround          {0x4a, 0x3a, 0x14};
+// True when the light set is in use (Monarchy's light scheme).
+inline bool Light = false;
+// Not const: on Monarchy these become the desktop's accent colour, set by
+// apply() before anything is drawn and again whenever it changes there. The
+// card colours below are a separate palette and never follow it.
+inline QColor Accent              {0x3d, 0xd6, 0x8c};  // "on", signal present
+inline QColor AccentDim           {0x24, 0x7f, 0x54};
 inline const QColor Warn          {0xff, 0xb3, 0x2e};
 inline const QColor Danger        {0xe8, 0x4b, 0x4b};
 // "on, and routed somewhere unusual" -- currently the channel whose monitor
 // mix is fed from its FX chain instead of the dry sink.
 inline const QColor Violet        {0xa9, 0x6d, 0xf5};
-inline const QColor Fader         {0xb4, 0xb4, 0xbe};  // fader handles
+inline QColor Fader               {0xb4, 0xb4, 0xbe};  // fader handles
+
+// A colour as a style sheet takes it: #rrggbb when opaque, rgba() when not.
+// QColor::name() drops the alpha, which turns a Monarchy wash solid.
+QString css(const QColor &c);
 
 // Per-channel identity colour, used for the icon tile and the fader accent.
 // Wave Link gives every input its own hue and it is the single thing that

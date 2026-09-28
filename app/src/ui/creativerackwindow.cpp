@@ -3,6 +3,7 @@
 
 #include "creativerackwindow.h"
 
+#include <QToolButton>
 #include <QAbstractButton>
 #include <QDateTime>
 #include <QDir>
@@ -19,6 +20,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+
+#include <tuple>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
@@ -33,6 +36,8 @@
 #include "engine/creativefx.h"
 #include "mixerclient.h"
 #include "rackpresetstore.h"
+#include "monarchy/chrome.h"
+#include "monarchy/desktop.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -913,70 +918,92 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
     outer->setContentsMargins(0, 0, 0, 0);
     outer->setSpacing(0);
 
-    auto *titleBar = new TitleBar(this);
-    // A floor under the layout's width, so the window doesn't pinch down to
-    // however wide the title text happens to be once there are few (or no)
-    // modules racked -- height is what's meant to track content here, not
-    // width.
-    titleBar->setMinimumWidth(500);
-    auto *titleLay = new QHBoxLayout(titleBar);
-    titleLay->setContentsMargins(10, 0, 8, 0);
-    titleLay->setSpacing(6);
-
+    QWidget *titleBar = nullptr;
+    QHBoxLayout *titleLay = nullptr;
     constexpr int kChromeBtnPx = 26;
+    // On Monarchy the desktop's own header takes the black bar's place: the
+    // traffic lights and the window's title, then the rack's two buttons as
+    // icons in one pill.
+    auto *chrome = Monarchy::WindowChrome::create(this);
+    if (chrome) {
+        titleBar = chrome->header();
+        titleBar->setMinimumWidth(500);
+        titleLay = chrome->toolbar();
+        titleLay->addStretch(1);
+    } else {
+        auto *bar = new TitleBar(this);
+        titleBar = bar;
+        // A floor under the layout's width, so the window doesn't pinch down to
+        // however wide the title text happens to be once there are few (or no)
+        // modules racked -- height is what's meant to track content here, not
+        // width.
+        titleBar->setMinimumWidth(500);
+        titleLay = new QHBoxLayout(titleBar);
+        titleLay->setContentsMargins(10, 0, 8, 0);
+        titleLay->setSpacing(6);
 
-    auto *closeBtn = new QPushButton(titleBar);
-    closeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("x"), Theme::Text, 14)));
-    closeBtn->setToolTip(tr("Close"));
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    closeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
-    connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
-    titleLay->addWidget(closeBtn);
+        auto *closeBtn = new QPushButton(titleBar);
+        closeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("x"), Theme::Text, 14)));
+        closeBtn->setToolTip(tr("Close"));
+        closeBtn->setCursor(Qt::PointingHandCursor);
+        closeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+        connect(closeBtn, &QPushButton::clicked, this, &QWidget::close);
+        titleLay->addWidget(closeBtn);
 
-    auto *minimizeBtn = new QPushButton(titleBar);
-    minimizeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("minus"), Theme::Text, 14)));
-    minimizeBtn->setToolTip(tr("Minimize"));
-    minimizeBtn->setCursor(Qt::PointingHandCursor);
-    minimizeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
-    connect(minimizeBtn, &QPushButton::clicked, this, &QWidget::showMinimized);
-    titleLay->addWidget(minimizeBtn);
+        auto *minimizeBtn = new QPushButton(titleBar);
+        minimizeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("minus"), Theme::Text, 14)));
+        minimizeBtn->setToolTip(tr("Minimize"));
+        minimizeBtn->setCursor(Qt::PointingHandCursor);
+        minimizeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+        connect(minimizeBtn, &QPushButton::clicked, this, &QWidget::showMinimized);
+        titleLay->addWidget(minimizeBtn);
 
-    auto *heading = new QLabel(tr("Creative FX Rack / %1").arg(title), titleBar);
-    QFont hf = heading->font();
-    hf.setBold(true);
-    hf.setPointSizeF(hf.pointSizeF() * 1.05);
-    heading->setFont(hf);
-    QPalette hp = heading->palette();
-    hp.setColor(QPalette::WindowText, Theme::Text);
-    heading->setPalette(hp);
-    titleLay->addSpacing(4);
-    titleLay->addWidget(heading);
-    titleLay->addStretch(1);
+        auto *heading = new QLabel(tr("Creative FX Rack / %1").arg(title), titleBar);
+        QFont hf = heading->font();
+        hf.setBold(true);
+        hf.setPointSizeF(hf.pointSizeF() * 1.05);
+        heading->setFont(hf);
+        QPalette hp = heading->palette();
+        hp.setColor(QPalette::WindowText, Theme::Text);
+        heading->setPalette(hp);
+        titleLay->addSpacing(4);
+        titleLay->addWidget(heading);
+        titleLay->addStretch(1);
+    }
 
-    presetsBtn_ = new QPushButton(titleBar);
-    presetsBtn_->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("save"), Theme::Text, 14)));
-    presetsBtn_->setToolTip(tr("Save, load, rename, import or export rack presets."));
-    presetsBtn_->setCursor(Qt::PointingHandCursor);
-    presetsBtn_->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+    const QString presetsTip = tr("Save, load, rename, import or export rack presets.");
+    const QString addTip = tr("Add an effect to the rack.");
+    if (chrome) {
+        presetsBtn_ = Monarchy::toolButton(QStringLiteral("save"), presetsTip, titleBar);
+        addBtn_ = Monarchy::toolButton(QStringLiteral("plus"), addTip, titleBar);
+    } else {
+        for (auto [slot, glyph, tip] : {std::tuple{&presetsBtn_, "save", presetsTip},
+                                        std::tuple{&addBtn_, "plus", addTip}}) {
+            auto *b = new QPushButton(titleBar);
+            b->setIcon(QIcon(Theme::iconPixmap(QString::fromLatin1(glyph), Theme::Text, 14)));
+            b->setToolTip(tip);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+            *slot = b;
+        }
+    }
     presetsMenu_ = new QMenu(presetsBtn_);
-    connect(presetsBtn_, &QPushButton::clicked, this, [this] {
+    connect(presetsBtn_, &QAbstractButton::clicked, this, [this] {
         presetsMenu_->exec(presetsBtn_->mapToGlobal(QPoint(0, presetsBtn_->height())));
     });
-    titleLay->addWidget(presetsBtn_);
-
-    addBtn_ = new QPushButton(titleBar);
-    addBtn_->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("plus"), Theme::Text, 14)));
-    addBtn_->setToolTip(tr("Add an effect to the rack."));
-    addBtn_->setCursor(Qt::PointingHandCursor);
-    addBtn_->setFixedSize(kChromeBtnPx, kChromeBtnPx);
-    // A plain popup rather than QPushButton::setMenu(): setMenu() paints its
-    // own drop-down chevron over the icon, which is not wanted on a button
+    // A plain popup rather than a button menu: QPushButton::setMenu() paints
+    // its own drop-down chevron over the icon, which is not wanted on a button
     // that is meant to read as a plain "+".
     addMenu_ = new QMenu(addBtn_);
-    connect(addBtn_, &QPushButton::clicked, this, [this] {
+    connect(addBtn_, &QAbstractButton::clicked, this, [this] {
         addMenu_->exec(addBtn_->mapToGlobal(QPoint(0, addBtn_->height())));
     });
-    titleLay->addWidget(addBtn_);
+    if (chrome) {
+        titleLay->addWidget(Monarchy::pillGroup(titleBar, {presetsBtn_, addBtn_}, Theme::Bg));
+    } else {
+        titleLay->addWidget(presetsBtn_);
+        titleLay->addWidget(addBtn_);
+    }
 
     outer->addWidget(titleBar);
 

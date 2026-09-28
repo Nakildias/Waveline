@@ -26,8 +26,14 @@ std::vector<std::string> appIdentityKeyCandidates(const PwNode &node);
 // Stable key for persisting manual channel assignments across restarts.
 std::string appIdentityKey(const PwNode &node);
 
-// Name to show in the Apps tab.
+// Name to show in the Apps tab. A Steam game's title, then the installed
+// application's own name from its launcher entry (see desktopentries.h), then
+// what the stream and the process say.
 std::string appDisplayName(const PwNode &node);
+
+// The icon the application's launcher entry names -- a theme icon name or a
+// path -- or empty when it has none or no entry was found.
+std::string appIconName(const PwNode &node);
 
 // Key for merging multiple playback streams from one program (Discord spawns
 // several WEBRTC helpers). Stable identity when available, else display name.

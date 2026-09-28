@@ -47,6 +47,7 @@ struct AppInfo {
     QString name;
     QString channelId;   // empty when we have not routed it
     double volume = 1.0; // playback level, 0..1.5 (default 1.0)
+    QString icon;        // the launcher entry's Icon=, empty when unknown
 };
 
 // One Soundboard sound. Mirrors MixerService::SoundboardSounds()'s row

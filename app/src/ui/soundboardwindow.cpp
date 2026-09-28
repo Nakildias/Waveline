@@ -4,6 +4,7 @@
 #include "soundboardwindow.h"
 #include "soundtrimdialog.h"
 
+#include <QToolButton>
 #include <QClipboard>
 #include <QComboBox>
 #include <QEvent>
@@ -41,6 +42,8 @@
 #include <cmath>
 
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
+#include "monarchy/desktop.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -140,6 +143,15 @@ protected:
 // can append them after the heading the same way the Virtual Rack does.
 QWidget *buildChromeTitleBar(QWidget *owner, const QString &heading,
                              QHBoxLayout **outLay = nullptr) {
+    // On Monarchy the bar is the desktop's own header instead: traffic lights
+    // and the window's title, with the same row handed back for the caller's
+    // controls. The window's title is the heading in both.
+    if (auto *chrome = Monarchy::WindowChrome::create(owner)) {
+        owner->setWindowTitle(heading);
+        if (outLay) *outLay = chrome->toolbar();
+        return chrome->header();
+    }
+
     auto *bar = new ChromeTitleBar(owner);
     auto *lay = new QHBoxLayout(bar);
     lay->setContentsMargins(10, 0, 8, 0);
@@ -593,7 +605,10 @@ void OverlayScrollBar::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(255, 255, 255, (dragging_ || hover_) ? 140 : 80));
+    // The text colour, so the handle shows on a light window as on a dark one.
+    QColor handle = Theme::Text;
+    handle.setAlpha((dragging_ || hover_) ? 140 : 80);
+    p.setBrush(handle);
     p.drawRoundedRect(r, r.width() / 2.0, r.width() / 2.0);
 }
 
@@ -685,7 +700,7 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     idBadge_->setFont(idFont);
     idBadge_->setStyleSheet(QStringLiteral(
                                 "background: %1; color: %2; border-radius: 4px; padding: 1px 6px;")
-                                .arg(Theme::Well.name(), Theme::TextDim.name()));
+                                .arg(Theme::css(Theme::Well), Theme::TextDim.name()));
     idBadge_->setToolTip(tr("Click to copy the wavelined-cli command that plays this sound\n"
                             "(for a Stream Deck button or a keybind)."));
     connect(idBadge_, &IdBadge::clicked, this, [this] {
@@ -974,7 +989,7 @@ void SoundboardSettingsWindow::applySettings(const SoundboardSettingsInfo &setti
 
     const bool shared = !settings.shareTarget.isEmpty();
     shareSlider_->setEnabled(shared);
-    shareSlider_->setAccent(shared ? Theme::channelColor(settings.shareTarget) : Theme::Line);
+    shareSlider_->setAccent(shared ? Theme::channelColor(settings.shareTarget) : Theme::Inactive);
     shareSlider_->setCursor(shared ? Qt::PointingHandCursor : Qt::ArrowCursor);
     shareSlider_->setToolTip(shared ? tr("How loud the soundboard is in the microphone.\n"
                                         "Does not change how loudly it plays for you.")
@@ -1368,23 +1383,33 @@ QWidget *SoundboardWindow::buildTitleBar() {
     lay->addWidget(simpleViewToggle_);
     lay->addSpacing(4);
 
-    settingsBtn_ = new QPushButton(titleBar);
-    settingsBtn_->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("gear"), Theme::Text, 15)));
-    settingsBtn_->setToolTip(tr("Soundboard Settings: which channel every sound plays on, "
-                               "whether it joins a microphone, the two live volumes, and "
-                               "backups."));
-    settingsBtn_->setCursor(Qt::PointingHandCursor);
-    settingsBtn_->setFixedSize(kChromeBtnPx, kChromeBtnPx);
-    connect(settingsBtn_, &QPushButton::clicked, this, &SoundboardWindow::showSettings);
-    lay->addWidget(settingsBtn_);
+    const QString settingsTip =
+        tr("Soundboard Settings: which channel every sound plays on, "
+           "whether it joins a microphone, the two live volumes, and backups.");
+    if (Monarchy::isActive()) {
+        // Monarchy's toolbar: the two as icons in one pill.
+        settingsBtn_ = Monarchy::toolButton(QStringLiteral("gear"), settingsTip, titleBar);
+        addBtn_ = Monarchy::toolButton(QStringLiteral("plus"), tr("Add a sound..."), titleBar);
+        lay->addWidget(Monarchy::pillGroup(titleBar, {settingsBtn_, addBtn_}, Theme::Bg));
+    } else {
+        auto *settings = new QPushButton(titleBar);
+        settings->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("gear"), Theme::Text, 15)));
+        settings->setToolTip(settingsTip);
+        settings->setCursor(Qt::PointingHandCursor);
+        settings->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+        lay->addWidget(settings);
+        settingsBtn_ = settings;
 
-    addBtn_ = new QPushButton(titleBar);
-    addBtn_->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("plus"), Theme::Text, 14)));
-    addBtn_->setToolTip(tr("Add a sound..."));
-    addBtn_->setCursor(Qt::PointingHandCursor);
-    addBtn_->setFixedSize(kChromeBtnPx, kChromeBtnPx);
-    connect(addBtn_, &QPushButton::clicked, this, &SoundboardWindow::onAddSound);
-    lay->addWidget(addBtn_);
+        auto *add = new QPushButton(titleBar);
+        add->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("plus"), Theme::Text, 14)));
+        add->setToolTip(tr("Add a sound..."));
+        add->setCursor(Qt::PointingHandCursor);
+        add->setFixedSize(kChromeBtnPx, kChromeBtnPx);
+        lay->addWidget(add);
+        addBtn_ = add;
+    }
+    connect(settingsBtn_, &QAbstractButton::clicked, this, &SoundboardWindow::showSettings);
+    connect(addBtn_, &QAbstractButton::clicked, this, &SoundboardWindow::onAddSound);
 
     return titleBar;
 }

@@ -88,10 +88,12 @@ void ToggleSwitch::paintEvent(QPaintEvent *) {
     if (isEnabled()) {
         // Interpolated rather than switched at the halfway point: the track
         // and the knob then finish moving at the same instant.
+        // Alpha too: on Monarchy the well is a translucent wash.
         track = QColor::fromRgbF(
             Theme::Well.redF()   + (Theme::Accent.redF()   - Theme::Well.redF())   * knob_,
             Theme::Well.greenF() + (Theme::Accent.greenF() - Theme::Well.greenF()) * knob_,
-            Theme::Well.blueF()  + (Theme::Accent.blueF()  - Theme::Well.blueF())  * knob_);
+            Theme::Well.blueF()  + (Theme::Accent.blueF()  - Theme::Well.blueF())  * knob_,
+            Theme::Well.alphaF() + (Theme::Accent.alphaF() - Theme::Well.alphaF()) * knob_);
     }
     p.setPen(QPen(isEnabled() && hover_ ? Theme::TextFaint : Theme::Line, 1));
     p.setBrush(track);
@@ -100,8 +102,15 @@ void ToggleSwitch::paintEvent(QPaintEvent *) {
     const qreal margin = 3.0;
     const qreal d = r.height() - margin * 2;
     const qreal x = r.left() + margin + (r.width() - margin * 2 - d) * knob_;
-    p.setPen(Qt::NoPen);
-    p.setBrush(isEnabled() ? Theme::Text : Theme::TextFaint);
+    // White in the light scheme, with a faint rim so it holds its edge on the
+    // pale off track; the text colour -- also white -- in the dark one.
+    if (Theme::Light) {
+        p.setPen(QPen(QColor(0, 0, 0, isEnabled() ? 40 : 20), 0.8));
+        p.setBrush(isEnabled() ? QColor(Qt::white) : QColor(0xf4, 0xf4, 0xf6));
+    } else {
+        p.setPen(Qt::NoPen);
+        p.setBrush(isEnabled() ? Theme::Text : Theme::TextFaint);
+    }
     p.drawEllipse(QRectF(x, r.top() + margin, d, d));
 
     if (hasFocus()) {
@@ -200,7 +209,7 @@ void Fader::paintEvent(QPaintEvent *) {
     if (filled.height() > 0) {
         QPainterPath fp;
         fp.addRoundedRect(filled, kGrooveW / 2.0, kGrooveW / 2.0);
-        QColor c = isEnabled() ? accent_ : Theme::Line;
+        QColor c = isEnabled() ? accent_ : Theme::Inactive;
         // Held back from full saturation: six neon strips at once is a lot of
         // colour for something that is only meant to identify the channel.
         c.setAlpha(muted_ ? 60 : 190);
@@ -311,7 +320,7 @@ void TrackSlider::paintEvent(QPaintEvent *) {
     if (filled.width() > 0) {
         QPainterPath fp;
         fp.addRoundedRect(filled, kTrackGrooveH / 2.0, kTrackGrooveH / 2.0);
-        QColor c = isEnabled() ? accent_ : Theme::Line;
+        QColor c = isEnabled() ? accent_ : Theme::Inactive;
         p.fillPath(fp, c);
     }
 
@@ -458,8 +467,11 @@ void Knob::paintEvent(QPaintEvent *) {
     p.drawArc(arcRect, int(kKnobStartAngle * 16), int(-kKnobSweepDeg * 16));
 
     // Flat white progress rather than the per-instance accent colour -- the
-    // rack reads as one piece of gear, not a control tinted per channel.
-    QColor fill = isEnabled() ? QColor(Qt::white) : Theme::Line;
+    // rack reads as one piece of gear, not a control tinted per channel. On a
+    // light window white is invisible, so there it is the desktop's accent:
+    // still one colour for the whole rack.
+    QColor fill = !isEnabled() ? Theme::Inactive
+                : Theme::Light ? Theme::Accent : QColor(Qt::white);
     p.setPen(QPen(fill, kKnobArcWidth, Qt::SolidLine, Qt::RoundCap));
     if (bipolar_) {
         constexpr qreal kCenterT = 0.5;
@@ -474,17 +486,30 @@ void Knob::paintEvent(QPaintEvent *) {
     // a UI chip -- matching the black housing already used on the rack's
     // power switch.
     const qreal capRadius = std::max(4.0, radius - kKnobArcWidth - 3.0);
-    QColor capColor = isEnabled() ? QColor(24, 24, 26) : Theme::TextFaint;
-    if (isSliderDown() || hasFocus()) capColor = capColor.lighter(160);
-    p.setPen(Qt::NoPen);
-    p.setBrush(capColor);
-    p.drawEllipse(center, capRadius, capRadius);
+    QColor pointer;
+    if (Theme::Light) {
+        // The light scheme's knob is the inverse: a white cap with a soft rim
+        // and a dark pointer. A black cap on a white card is the heaviest
+        // thing in the window, twenty times over in a full rack.
+        QColor capColor = isEnabled() ? QColor(Qt::white) : QColor(0xf0, 0xf0, 0xf2);
+        if (isSliderDown() || hasFocus()) capColor = capColor.darker(106);
+        p.setPen(QPen(QColor(0, 0, 0, isEnabled() ? 45 : 25), 1));
+        p.setBrush(capColor);
+        p.drawEllipse(center, capRadius, capRadius);
+        pointer = isEnabled() ? Theme::Text : Theme::TextFaint;
+    } else {
+        QColor capColor = isEnabled() ? QColor(24, 24, 26) : Theme::TextFaint;
+        if (isSliderDown() || hasFocus()) capColor = capColor.lighter(160);
+        p.setPen(Qt::NoPen);
+        p.setBrush(capColor);
+        p.drawEllipse(center, capRadius, capRadius);
+        pointer = isEnabled() ? QColor(Qt::white) : Theme::TextFaint;
+    }
 
     const qreal angle = kKnobStartAngle - t * kKnobSweepDeg;
     const QPointF inner = pointOnCircle(center, capRadius * 0.3, angle);
     const QPointF outer = pointOnCircle(center, capRadius * 0.85, angle);
-    p.setPen(QPen(isEnabled() ? QColor(Qt::white) : Theme::TextFaint, 2, Qt::SolidLine,
-                 Qt::RoundCap));
+    p.setPen(QPen(pointer, 2, Qt::SolidLine, Qt::RoundCap));
     p.drawLine(inner, outer);
 
     if (hasFocus()) {

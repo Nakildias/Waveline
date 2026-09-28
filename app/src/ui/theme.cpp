@@ -15,11 +15,85 @@
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QSvgRenderer>
+#include <QWidget>
+
+#include "monarchy/desktop.h"
 
 namespace Theme {
 namespace {
 
-QString hex(const QColor &c) { return c.name(QColor::HexRgb); }
+QString hex(const QColor &c) { return css(c); }
+
+QString rgba(const QColor &c, int alpha) {
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(c.red()).arg(c.green()).arg(c.blue()).arg(alpha);
+}
+
+// On Monarchy, the green becomes the desktop's accent. The dim variant keeps
+// the green pair's relationship: the same hue, about 60% of the value.
+void followMonarchyAccent() {
+    const QColor accent = Monarchy::accentColour();
+    if (!accent.isValid()) return;
+    Accent = accent;
+    if (Light) {
+        // A pale tint rather than a dark shade: it is a ground dark text sits
+        // on (a checked segment, a selection), and on a light window a dark
+        // shade of the accent would be a block of ink.
+        AccentDim = QColor(qRound(accent.red() * 0.4 + 255 * 0.6),
+                           qRound(accent.green() * 0.4 + 255 * 0.6),
+                           qRound(accent.blue() * 0.4 + 255 * 0.6));
+    } else {
+        AccentDim = accent.darker(168);
+    }
+}
+
+// Monarchy's dark scheme. The window paints one tint at the desktop's
+// opacity, and every surface inside it is a wash over that tint rather than a
+// colour of its own. Stacked solid colours at the same opacity would
+// multiply: a card on the well on the window came out nearly opaque, and the
+// blur only showed through the window's bare margins. Each wash is worked out
+// so that, over the tint, it lands on the colour the universal look paints --
+// Card 1e1e22 and Well 0c0c0e over Bg 121214 -- so the mixer looks the same
+// and only lets the desktop through.
+void useMonarchyDark() {
+    Light = false;
+    Bg = QColor(0x12, 0x12, 0x14);
+    Card = QColor(255, 255, 255, 13);
+    CardHover = QColor(255, 255, 255, 22);
+    Well = QColor(0, 0, 0, 85);
+    Popup = QColor(0x1e, 0x1e, 0x22);
+    Line = QColor(0x2e, 0x2e, 0x34);
+    Inactive = QColor(0x2e, 0x2e, 0x34);
+    Text = QColor(0xe8, 0xe8, 0xec);
+    TextDim = QColor(0x9a, 0x9a, 0xa4);
+    TextFaint = QColor(0x66, 0x66, 0x70);
+    Fader = QColor(0xb4, 0xb4, 0xbe);
+    DangerGround = QColor(0x4a, 0x1d, 0x1d);
+    WarnGround = QColor(0x4a, 0x3a, 0x14);
+}
+
+// Monarchy's light scheme, from its own monarchy-light.colors: the window
+// f3f3f3, text 1d1d1f and 6e6e73. Cards are white washes over the tint, the
+// way Monarchy's light windows raise a surface, and the well a faint shadow;
+// hairlines are a dark wash so they read on both.
+void useMonarchyLight() {
+    Light = true;
+    Bg = QColor(0xf3, 0xf3, 0xf3);
+    Card = QColor(255, 255, 255, 170);
+    CardHover = QColor(255, 255, 255, 235);
+    Well = QColor(0, 0, 0, 20);
+    Popup = QColor(0xfa, 0xfa, 0xfa);
+    Line = QColor(0, 0, 0, 30);
+    Inactive = QColor(0xc9, 0xc9, 0xce);
+    Text = QColor(0x1d, 0x1d, 0x1f);
+    TextDim = QColor(0x6e, 0x6e, 0x73);
+    TextFaint = QColor(0xa0, 0xa0, 0xa6);
+    // The handles sit on white cards, where the dark scheme's pale grey would
+    // all but vanish.
+    Fader = QColor(0x80, 0x80, 0x88);
+    DangerGround = QColor(0xf6, 0xd5, 0xd5);
+    WarnGround = QColor(0xf6, 0xe8, 0xc4);
+}
 
 // Pushed in from the window on every refresh; read by everything that draws a
 // channel. A plain hash rather than anything cleverer: it is written once per
@@ -150,7 +224,7 @@ QPixmap iconPixmap(const QString &name, const QColor &color, int px) {
     QString svg = QString::fromUtf8(f.readAll());
     // Tabler icons stroke with currentColor and fill nothing. Substituting the
     // literal is enough; there is no CSS engine involved.
-    svg.replace(QLatin1String("currentColor"), hex(color));
+    svg.replace(QLatin1String("currentColor"), color.name(QColor::HexRgb));
 
     QSvgRenderer renderer(svg.toUtf8());
     QPixmap pm(QSize(px, px) * dpr);
@@ -303,6 +377,12 @@ QIcon icon(const QString &name, const QColor &color, int px) {
     return pm.isNull() ? QIcon() : QIcon(pm);
 }
 
+QString css(const QColor &c) {
+    if (c.alpha() == 255) return c.name(QColor::HexRgb);
+    return QStringLiteral("rgba(%1,%2,%3,%4)")
+        .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alpha());
+}
+
 QString styleSheet() {
     return QStringLiteral(R"(
 QWidget {
@@ -311,8 +391,24 @@ QWidget {
     font-size: 13px;
 }
 QMainWindow, QDialog { background: %BG%; }
+/* ------------------------------------------------------------ toolbar
+   Monarchy's toolbar pills, used by the main window's header in both looks
+   and by every window's header on Monarchy (see ui/monarchy/chrome.h). The
+   fill is on the group, which is exactly the shape its rim light follows; the
+   button inside is a transparent circle that lights up under the pointer. */
+QWidget#actionGroup { background: %PILL%; border-radius: 18px; }
+QToolButton#chromeButton {
+    background: transparent; border: none; padding: 0; margin: 4px;
+    border-radius: 14px;
+    min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px;
+}
+QToolButton#chromeButton:hover:enabled { background: %PILLHOVER%; }
+QToolButton#chromeButton:pressed { background: %PILLPRESSED%; }
+QToolButton#chromeButton:checked { background: %PILLPRESSED%; }
+QLabel#monarchyTitle { font-size: 20px; font-weight: 600; }
+QLabel#monarchyWindowTitle { font-size: 15px; font-weight: 600; }
 QToolTip {
-    background: %CARD%;
+    background: %POPUP%;
     color: %TEXT%;
     border: 1px solid %LINE%;
     border-radius: 6px;
@@ -502,21 +598,52 @@ QSlider::handle:horizontal:disabled { background: %TEXTFAINT%; }
         .replace(QLatin1String("%CHEVRON%"), tintedIconFile(
                                                  QStringLiteral("chevron"),
                                                  Text, 18))
-        .replace(QLatin1String("%FADER%"), hex(Fader));
+        .replace(QLatin1String("%FADER%"), hex(Fader))
+        .replace(QLatin1String("%POPUP%"), hex(Popup))
+        .replace(QLatin1String("%PILLHOVER%"), rgba(Text, 30))
+        .replace(QLatin1String("%PILLPRESSED%"), rgba(Text, 44))
+        .replace(QLatin1String("%PILL%"), rgba(Text, 16));
 }
 
 void apply() {
+    if (Monarchy::isActive()) {
+        if (Monarchy::isLight()) useMonarchyLight();
+        else useMonarchyDark();
+        followMonarchyAccent();
+        // The accent changed in Settings while the mixer is open: re-style
+        // everything, and repaint what draws itself from the colours above.
+        // Icons already rendered keep the old accent until they are rebuilt.
+        // A switch between light and dark is not handled here -- too much of
+        // the window holds colours it copied when it was built -- but by
+        // reopening the window; see main.cpp.
+        static bool watching = false;
+        if (!watching) {
+            watching = true;
+            QObject::connect(&Monarchy::Settings::instance(), &Monarchy::Settings::changed,
+                             qApp, [] {
+                if (Monarchy::isLight() != Light) return;
+                const QColor before = Accent;
+                followMonarchyAccent();
+                if (Accent == before) return;
+                apply();
+                for (QWidget *w : QApplication::allWidgets()) w->update();
+            });
+        }
+    }
+
     QPalette pal;
     pal.setColor(QPalette::Window, Bg);
     pal.setColor(QPalette::WindowText, Text);
-    pal.setColor(QPalette::Base, Well);
-    pal.setColor(QPalette::AlternateBase, Card);
+    // Solid in the light scheme: a palette ground is what a popup or an edit
+    // field fills itself with, and a white wash over nothing is no ground.
+    pal.setColor(QPalette::Base, Light ? QColor(0xfa, 0xfa, 0xfa) : Well);
+    pal.setColor(QPalette::AlternateBase, Light ? QColor(0xee, 0xee, 0xee) : Card);
     pal.setColor(QPalette::Text, Text);
-    pal.setColor(QPalette::Button, Card);
+    pal.setColor(QPalette::Button, Light ? QColor(0xfa, 0xfa, 0xfa) : Card);
     pal.setColor(QPalette::ButtonText, Text);
     pal.setColor(QPalette::Highlight, AccentDim);
     pal.setColor(QPalette::HighlightedText, Text);
-    pal.setColor(QPalette::ToolTipBase, Card);
+    pal.setColor(QPalette::ToolTipBase, Popup);
     pal.setColor(QPalette::ToolTipText, Text);
     pal.setColor(QPalette::PlaceholderText, TextFaint);
     pal.setColor(QPalette::Disabled, QPalette::Text, TextFaint);

@@ -280,7 +280,7 @@ void CardIdentityDialog::updatePreview() {
                        "border-radius: 7px; padding: 6px 9px; "
                        "selection-background-color: %3; }"
                        "QLineEdit:focus { border-color: %4; }")
-            .arg(Theme::Well.name(), Theme::Line.name(),
+            .arg(Theme::css(Theme::Well), Theme::css(Theme::Line),
                  selection.name(QColor::HexArgb), color_.name()));
     for (QToolButton *b : swatches_) {
         const QColor c = b->property("swatch").value<QColor>();

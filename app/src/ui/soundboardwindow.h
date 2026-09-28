@@ -39,6 +39,7 @@
 
 class QComboBox;
 class QGridLayout;
+class QAbstractButton;
 class QPushButton;
 class QScrollArea;
 class QTimer;
@@ -373,8 +374,9 @@ private:
     // ---------------------------------------------------------- title bar
     QLabel *countLabel_ = nullptr;
     ToggleSwitch *simpleViewToggle_ = nullptr;
-    QPushButton *settingsBtn_ = nullptr;
-    QPushButton *addBtn_ = nullptr;
+    // QPushButtons in the universal look, Monarchy toolbar buttons there.
+    QAbstractButton *settingsBtn_ = nullptr;
+    QAbstractButton *addBtn_ = nullptr;
     SoundboardSettingsWindow *settingsWindow_ = nullptr;
 
     // -------------------------------------------------------------- the rack

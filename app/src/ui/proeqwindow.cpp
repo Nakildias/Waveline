@@ -24,6 +24,7 @@
 
 #include "engine/biquad.h"
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -652,6 +653,7 @@ ProEqWindow::ProEqWindow(MixerClient *client, const ProEqTarget &target,
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(16, 16, 16, 16);
     lay->setSpacing(12);
+    Monarchy::WindowChrome::adopt(this, lay);
 
     // ---- top row: the master switch, the presets, and the way back to flat
     auto *top = new QHBoxLayout;
@@ -704,8 +706,8 @@ ProEqWindow::ProEqWindow(MixerClient *client, const ProEqTarget &target,
                            "QPushButton:hover { background: %4; }"
                            "QPushButton:checked { background: %5; color: %6;"
                            "  border: 1px solid %5; }")
-                .arg(Theme::Well.name(), Theme::TextDim.name(), Theme::Line.name(),
-                     Theme::CardHover.name(), c.name(), Theme::glyphOn(c).name()));
+                .arg(Theme::css(Theme::Well), Theme::TextDim.name(), Theme::css(Theme::Line),
+                     Theme::css(Theme::CardHover), c.name(), Theme::glyphOn(c).name()));
         bandButtons_[i] = b;
         picker->addWidget(b);
         connect(b, &QPushButton::clicked, this, [this, i] { selectBand(i); });

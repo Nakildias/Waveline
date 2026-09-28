@@ -21,6 +21,7 @@
 
 #include <QWidget>
 
+class MeasurementsWindow;
 class MixerClient;
 class QCheckBox;
 class QComboBox;
@@ -71,7 +72,6 @@ private:
 
     void refreshWarnings();
     void refreshServices();
-    void refreshDiagnostics();
     void refresh();
 
     MixerClient *client_ = nullptr;
@@ -95,12 +95,36 @@ private:
     QVBoxLayout *servicesLay_ = nullptr;
     QString servicesSignature_;
 
-    QTableWidget *table_ = nullptr;
-    QLabel *tableEmpty_ = nullptr;
-    QStringList rows_;
-    QString rowsSignature_;
+    // Opened from the Diagnostics tab; created on first use and kept.
+    MeasurementsWindow *measurementsWindow_ = nullptr;
 
     // Only while the window is on screen. Every tick is D-Bus calls plus a
     // systemctl, and a panel nobody is looking at should cost nothing.
+    QTimer *poll_ = nullptr;
+};
+
+// The graph's measurements -- latency per device, and with DSP profiling on,
+// each effect's cost and the missed cycles -- as a table in a window of its
+// own. It is far wider and longer than the Diagnostics tab has room for.
+class MeasurementsWindow : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit MeasurementsWindow(MixerClient *client, QWidget *parent = nullptr);
+
+    // Redraws now, whatever the last poll saw.
+    void refreshNow();
+
+protected:
+    void showEvent(QShowEvent *) override;
+    void hideEvent(QHideEvent *) override;
+
+private:
+    void refresh();
+
+    MixerClient *client_ = nullptr;
+    QTableWidget *table_ = nullptr;
+    QLabel *empty_ = nullptr;
+    QString signature_;
     QTimer *poll_ = nullptr;
 };

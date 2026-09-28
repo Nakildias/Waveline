@@ -275,6 +275,7 @@ class CardBase : public QFrame {
 public:
     explicit CardBase(QWidget *parent = nullptr);
     void setRadius(int r);
+    int radius() const { return radius_; }
     void setFillColor(const QColor &c);
     // A 3px strip of the channel colour along the top edge.
     void setTopStripe(const QColor &c);
