@@ -19,8 +19,8 @@
 #   GROUP="audio"    fallback for headless/multi-seat setups where there is no
 #                    logind session to attach an ACL to.
 #
-# Nothing here touches the audio interfaces (0, 1, 2). snd-usb-audio keeps
-# them, and this rule does not detach or rebind anything.
+# The access rule does not touch the audio interfaces (0, 1, 2). snd-usb-audio
+# keeps them. The one exception is the boot hold at the end of this file.
 #
 # Installs to /etc/udev/rules.d/60-waveline-wave3.rules -- after the distro's
 # own USB rules (50-*) so the mode and group here win.
@@ -37,3 +37,27 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", MODE="0660", 
 # silently become root-only mid-recovery. Nothing in this repo writes to the
 # DFU interface; see the safety rules in docs/protocol.md.
 SUBSYSTEM=="usb", ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0071", MODE="0660", GROUP="audio", TAG+="uaccess"
+
+# Boot hold (issue #9). A Wave:3 that is reset without losing power -- a warm
+# reboot on a board that keeps USB powered, or a VM reboot -- sometimes wedges if
+# snd-usb-audio queries it straight away. Its first mixer read times out
+# (-110), every usb_set_interface after that stalls (-32), the ring turns red,
+# and only a replug clears it. Rebuild cannot help, because the device itself
+# is stuck. Given ~15 s after the reset before the first query, it comes up
+# clean every time:
+#   touched immediately: 5 of 10 wedged
+#   held back:           0 of 13 (45 s x6, 15 s x4 idle resets, 15 s x3 boots)
+# (measured in a VM, where every reboot is a warm reset).
+#
+# So at the first add of the boot, the device is left unconfigured
+# (authorized=0). No driver binds and nothing talks to it. A transient timer
+# authorizes it 15 s later. The daemon sees an ordinary hotplug and follows it.
+# The marker in /run makes this once per boot. A real replug later is a
+# power cycle, needs no delay, and appears immediately. /run is cleared on every
+# boot, so the next boot holds again. ACTION=="add" only, so the installer's
+# `udevadm trigger` (a change event) never hides a microphone that is in use.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", \
+  ATTR{idVendor}=="0fd9", ATTR{idProduct}=="0070", \
+  TEST!="/run/waveline/wave3-released", \
+  ATTR{authorized}="0", \
+  RUN+="/usr/bin/systemd-run --no-block --collect --quiet --unit=waveline-wave3-release-%k --on-active=15 --timer-property=AccuracySec=1s /usr/bin/sh -c 'mkdir -p /run/waveline && touch /run/waveline/wave3-released && echo 1 > /sys%p/authorized'"
