@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -91,6 +92,9 @@ SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     tf.setPointSizeF(tf.pointSizeF() * 1.2);
     title->setFont(tf);
     outer->addWidget(title);
+    // On Monarchy the window's header carries its name, so the heading in the
+    // window would say it twice.
+    if (Monarchy::WindowChrome::adopt(this, outer)) title->hide();
 
     auto *tabs = new QTabWidget(this);
     tabs->addTab(buildLatencyTab(), tr("Latency"));
@@ -106,7 +110,11 @@ SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     auto *copy = new QPushButton(tr("Copy diagnostics"), this);
     connect(copy, &QPushButton::clicked, this, [this] {
         QStringList lines;
-        for (const QString &r : rows_) {
+        // Fetched now rather than read from the Measurements window: the copy
+        // works whether or not that window is open.
+        const QStringList rows =
+            client_->available() ? client_->graphDiagnostics() : QStringList{};
+        for (const QString &r : rows) {
             const QStringList f = r.split(QLatin1Char('\t'));
             QString line = f.value(0) + QLatin1String(": ") + f.value(1);
             if (f.size() > 2 && !f[2].isEmpty())
@@ -419,11 +427,12 @@ void SettingsWindow::onDspProfilingToggled(bool on) {
     if (syncing_ || !dspProfilingCheck_) return;
     if (on == client_->dspProfiling()) return;
     client_->setDspProfiling(on);
-    // Redrawn at once rather than left to the next tick. The rows this switch
-    // adds and removes are the only visible evidence it did anything, and two
-    // seconds of an unchanged table reads as a control that does nothing.
-    rowsSignature_.clear();
-    refreshDiagnostics();
+    // The Measurements window redrawn at once rather than left to its next
+    // tick. The rows this switch adds and removes are the only visible
+    // evidence it did anything, and two seconds of an unchanged table reads
+    // as a control that does nothing.
+    if (measurementsWindow_ && measurementsWindow_->isVisible())
+        measurementsWindow_->refreshNow();
 }
 
 void SettingsWindow::syncDspProfilingCheck() {
@@ -657,15 +666,54 @@ QWidget *SettingsWindow::buildDiagnosticsTab() {
         page));
     lay->addWidget(profiling);
 
+    // The measurements themselves -- per-device latency and DSP cost, a row
+    // for everything worth a number -- are a table far wider and longer than a
+    // tab has room for, so they open in a window of their own.
+    auto *measurements = new Section(tr("Measurements"), page);
+    auto *measLay = measurements->contentLayout();
+    measLay->addWidget(dimLabel(
+        tr("Measured latency per device, and with DSP profiling on, what each "
+           "effect costs and how many cycles were missed."),
+        page));
+    auto *open = new QPushButton(tr("Open Measurements\u2026"), page);
+    open->setCursor(Qt::PointingHandCursor);
+    connect(open, &QPushButton::clicked, this, [this] {
+        if (!measurementsWindow_) measurementsWindow_ = new MeasurementsWindow(client_, this);
+        measurementsWindow_->show();
+        measurementsWindow_->raise();
+        measurementsWindow_->activateWindow();
+    });
+    auto *openRow = new QHBoxLayout;
+    openRow->addWidget(open);
+    openRow->addStretch();
+    measLay->addLayout(openRow);
+    lay->addWidget(measurements);
+    lay->addStretch(1);
+    return page;
+}
+
+// ------------------------------------------------------- Measurements window
+
+MeasurementsWindow::MeasurementsWindow(MixerClient *client, QWidget *parent)
+    : QWidget(parent, Qt::Window), client_(client) {
+    setWindowTitle(tr("Measurements"));
+    resize(760, 560);
+    setMinimumSize(480, 320);
+
+    auto *lay = new QVBoxLayout(this);
+    lay->setContentsMargins(16, 16, 16, 16);
+    lay->setSpacing(12);
+    Monarchy::WindowChrome::adopt(this, lay);
+
     lay->addWidget(dimLabel(
-        tr("Latency figures below are measured from ALSA, not calculated from "
+        tr("Latency figures are measured from ALSA, not calculated from "
            "settings. They cover everything from the device handing audio to "
            "this machine onwards, and nothing the device did before that. A "
            "camera or headset running its own noise suppression can add far "
            "more upstream of anything Linux can see."),
-        page));
+        this));
 
-    table_ = new QTableWidget(0, 3, page);
+    table_ = new QTableWidget(0, 3, this);
     table_->setHorizontalHeaderLabels({tr("What"), tr("Value"), tr("Detail")});
     table_->verticalHeader()->setVisible(false);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -676,11 +724,48 @@ QWidget *SettingsWindow::buildDiagnosticsTab() {
     table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
     lay->addWidget(table_, 1);
 
-    tableEmpty_ = dimLabel(
-        tr("wavelined is not running, so there is nothing to report."), page);
-    tableEmpty_->setVisible(false);
-    lay->addWidget(tableEmpty_);
-    return page;
+    empty_ = dimLabel(tr("wavelined is not running, so there is nothing to report."), this);
+    empty_->setVisible(false);
+    lay->addWidget(empty_);
+
+    // Its own poll, so it keeps counting with the Settings window closed --
+    // and, like that one, only while it is on screen.
+    poll_ = new QTimer(this);
+    poll_->setInterval(2000);
+    connect(poll_, &QTimer::timeout, this, &MeasurementsWindow::refresh);
+}
+
+void MeasurementsWindow::refreshNow() {
+    signature_.clear();
+    refresh();
+}
+
+void MeasurementsWindow::showEvent(QShowEvent *e) {
+    QWidget::showEvent(e);
+    refreshNow();
+    poll_->start();
+}
+
+void MeasurementsWindow::hideEvent(QHideEvent *e) {
+    QWidget::hideEvent(e);
+    poll_->stop();
+}
+
+void MeasurementsWindow::refresh() {
+    const QStringList rows = client_->available() ? client_->graphDiagnostics() : QStringList{};
+    const QString sig = rows.join(QLatin1Char('\n'));
+    if (sig == signature_) return;
+    signature_ = sig;
+
+    table_->setVisible(!rows.isEmpty());
+    empty_->setVisible(rows.isEmpty());
+    table_->setRowCount(rows.size());
+    for (int r = 0; r < rows.size(); ++r) {
+        const QStringList f = rows[r].split(QLatin1Char('\t'));
+        for (int c = 0; c < 3; ++c)
+            table_->setItem(r, c, new QTableWidgetItem(c < f.size() ? f[c] : QString()));
+    }
+    table_->resizeRowsToContents();
 }
 
 void SettingsWindow::refreshServices() {
@@ -759,27 +844,6 @@ void SettingsWindow::refreshServices() {
     }
 }
 
-void SettingsWindow::refreshDiagnostics() {
-    if (!table_) return;
-    rows_ = client_->available() ? client_->graphDiagnostics() : QStringList{};
-
-    const QString sig = rows_.join(QLatin1Char('\n'));
-    if (sig == rowsSignature_) return;
-    rowsSignature_ = sig;
-
-    table_->setVisible(!rows_.isEmpty());
-    tableEmpty_->setVisible(rows_.isEmpty());
-
-    table_->setRowCount(rows_.size());
-    for (int r = 0; r < rows_.size(); ++r) {
-        const QStringList f = rows_[r].split(QLatin1Char('\t'));
-        for (int c = 0; c < 3; ++c)
-            table_->setItem(r, c,
-                            new QTableWidgetItem(c < f.size() ? f[c] : QString()));
-    }
-    table_->resizeRowsToContents();
-}
-
 void SettingsWindow::refresh() {
     syncLatencyCombo();
     syncDesktopTab();
@@ -788,7 +852,6 @@ void SettingsWindow::refresh() {
     syncDspProfilingCheck();
     refreshWarnings();
     refreshServices();
-    refreshDiagnostics();
 }
 
 void SettingsWindow::showEvent(QShowEvent *e) {
@@ -797,7 +860,6 @@ void SettingsWindow::showEvent(QShowEvent *e) {
     // opens showing what it last saw is a panel that lies for two seconds.
     warningsSignature_.clear();
     servicesSignature_.clear();
-    rowsSignature_.clear();
     refresh();
     poll_->start();
 }

@@ -99,7 +99,7 @@ void WaveformView::paintEvent(QPaintEvent *) {
         const int h = std::max(1, static_cast<int>(peaks_[i] * (height() * 0.9)));
         const bool inTrim = x >= startX && x <= endX;
         p.setPen(Qt::NoPen);
-        p.setBrush(inTrim ? Theme::Accent : Theme::Line);
+        p.setBrush(inTrim ? Theme::Accent : Theme::Inactive);
         p.drawRect(x, midY - h / 2, barW, h);
     }
 

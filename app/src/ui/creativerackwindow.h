@@ -22,6 +22,7 @@ class PowerSwitch;
 class QHBoxLayout;
 class QLabel;
 class QMenu;
+class QAbstractButton;
 class QPushButton;
 class QVBoxLayout;
 
@@ -147,9 +148,10 @@ private:
     QString masterId_;
     QVBoxLayout *modulesLay_ = nullptr;
     QWidget *modulesContainer_ = nullptr;
-    QPushButton *addBtn_ = nullptr;
+    // QPushButtons in the universal look, Monarchy toolbar buttons there.
+    QAbstractButton *addBtn_ = nullptr;
     QMenu *addMenu_ = nullptr;
-    QPushButton *presetsBtn_ = nullptr;
+    QAbstractButton *presetsBtn_ = nullptr;
     QMenu *presetsMenu_ = nullptr;
     QString lastPresetDir_;
     QHash<int, RackModule *> modules_;

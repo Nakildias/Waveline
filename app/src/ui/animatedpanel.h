@@ -25,7 +25,9 @@ protected:
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setBrush(Theme::Card);
+        // Solid, not the Monarchy wash: it sits across a panel's edge and has
+        // to hide the line it covers.
+        p.setBrush(Theme::Popup);
         p.setPen(QPen(hasFocus() || underMouse() ? Theme::Accent : Theme::TextDim, 0.7));
         p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5);
         p.setPen(QPen(Theme::Text, 1.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -143,7 +145,9 @@ private:
         const QPoint origin = mapTo(host, QPoint(0, 0));
         QPoint center;
         if (direction_ == Qt::Horizontal)
-            center = QPoint(isHidden() ? area.right() - 16 : origin.x(), area.center().y());
+            // Collapsed, it sits on the window's edge, the way the vertical
+            // one does on the bottom edge.
+            center = QPoint(isHidden() ? area.right() + 1 : origin.x(), area.center().y());
         else
             center = QPoint(area.center().x(), isHidden() ? area.bottom() : origin.y());
         button_->move(center.x() - button_->width() / 2, center.y() - button_->height() / 2);

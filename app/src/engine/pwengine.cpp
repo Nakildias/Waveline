@@ -771,6 +771,14 @@ bool PwEngine::setStreamTarget(uint32_t nodeId, const std::string &sinkName,
 
 bool PwEngine::streamSinkNode(uint32_t streamNodeId, PwNode &out) const {
     std::lock_guard<std::mutex> lock(d_->nodesMutex);
+    // Where the stream plays, which is not every node its output is linked
+    // to. Programs listen to other programs' streams directly: a music
+    // player's visualiser taps its own playback, a screen share captures the
+    // apps it shares. Each is a second set of links off the same ports, and
+    // taking whichever link came first called the listener the stream's sink
+    // -- and reported the stream as moved off its channel while it was still
+    // playing on it.
+    bool found = false;
     for (const auto &[linkId, ends] : d_->pipewireLinks) {
         (void)linkId;
         const auto outPort = d_->ports.find(ends.first);
@@ -780,13 +788,21 @@ bool PwEngine::streamSinkNode(uint32_t streamNodeId, PwNode &out) const {
         if (inPort == d_->ports.end()) continue;
         const auto node = d_->nodes.find(inPort->second.nodeId);
         if (node == d_->nodes.end()) continue;
-        // The first link is enough: a stereo stream has two of them and both
-        // land on the same sink. A stream split across two sinks is not a
-        // thing PipeWire's session managers produce.
-        out = node->second;
-        return true;
+        // A recording stream is a listener, never where the audio plays.
+        if (node->second.mediaClass.rfind("Stream/Input", 0) == 0) continue;
+        // Still linked to one of ours means it is still where we put it, even
+        // if something else -- a screen share's own virtual sink -- is also
+        // taking a copy.
+        if (node->second.name.rfind("waveline-", 0) == 0) {
+            out = node->second;
+            return true;
+        }
+        if (!found) {
+            out = node->second;
+            found = true;
+        }
     }
-    return false;
+    return found;
 }
 
 bool PwEngine::streamSourceNode(uint32_t streamNodeId, PwNode &out) const {

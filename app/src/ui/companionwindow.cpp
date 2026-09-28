@@ -14,6 +14,7 @@
 #include <QVBoxLayout>
 
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -69,6 +70,9 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     tf.setPointSizeF(tf.pointSizeF() * 1.2);
     title->setFont(tf);
     outer->addWidget(title);
+    // On Monarchy the window's header carries its name, so the heading in the
+    // window would say it twice.
+    if (Monarchy::WindowChrome::adopt(this, windowLay)) title->hide();
 
     auto *blurb = dimLabel(
         tr("Use a phone or tablet as a second control surface. Open one of the "

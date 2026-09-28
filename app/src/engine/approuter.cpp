@@ -4,6 +4,7 @@
 #include "approuter.h"
 
 #include "appidentity.h"
+#include "desktopentries.h"
 #include "pwengine.h"
 #include "steamdetector.h"
 
@@ -121,6 +122,14 @@ std::string AppRouter::channelForNode(const PwNode &n) const {
     const std::string name = appDisplayName(n);
     const std::string byName = channelFor(name);
     if (byName != fallback) return byName;
+    // Nothing in the name rules: what the application's launcher entry says it
+    // is. A music player named "Music" matches no keyword, and its category
+    // says Player.
+    if (const auto entry = desktopEntryForProcess(n.processId, n.processBinary)) {
+        if (const std::string byCategory = channelForCategories(entry->categories);
+            !byCategory.empty())
+            return byCategory;
+    }
     if (n.processId == 0) return {};
     return fallback;
 }

@@ -621,7 +621,9 @@ public slots:
     void PlayTunerReference(double hz, int ms);
 
     // ---- routing ---------------------------------------------------------
-    // "nodeId\tapplication\tchannel" per entry, so no custom type is needed.
+    // "nodeId\tapplication\tchannel\tvolume\ticon" per entry, so no custom
+    // type is needed. The icon is the launcher entry's Icon= -- a theme name
+    // or a path -- and empty when the application has none.
     QStringList Apps() const;
     void MoveApp(uint nodeId, const QString &channelId);
     // Playback volume of an application stream, 0..1.5 (100% default).

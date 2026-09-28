@@ -29,6 +29,7 @@
 #include "levelmeter.h"
 #include "mixerclient.h"
 #include "proeqwindow.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 #include "widgets.h"
 
@@ -272,8 +273,8 @@ void styleEffectsTabs(QTabWidget *tabs) {
         "  color: %7;"
         "  background: %3;"
         "}")
-                            .arg(Theme::Line.name(), Theme::Card.name(), Theme::Well.name(),
-                                 Theme::TextDim.name(), Theme::CardHover.name(),
+                            .arg(Theme::css(Theme::Line), Theme::css(Theme::Card), Theme::css(Theme::Well),
+                                 Theme::TextDim.name(), Theme::css(Theme::CardHover),
                                  Theme::Text.name(), Theme::TextFaint.name()));
 }
 
@@ -1423,6 +1424,7 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(16, 16, 16, 16);
     lay->setSpacing(12);
+    Monarchy::WindowChrome::adopt(this, lay);
 
     auto *centreRow = new QHBoxLayout;
     auto *centreLabel = new QLabel(tr("Centre the microphone"), this);
@@ -2741,6 +2743,7 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(16, 16, 16, 16);
     lay->setSpacing(12);
+    Monarchy::WindowChrome::adopt(this, lay);
 
     auto *micRow = new QHBoxLayout;
     auto *micLabel = new QLabel(tr("Publish as a recording device"), this);

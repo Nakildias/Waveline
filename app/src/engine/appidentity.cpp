@@ -3,6 +3,7 @@
 
 #include "appidentity.h"
 
+#include "desktopentries.h"
 #include "pwengine.h"
 #include "steamdetector.h"
 
@@ -412,6 +413,12 @@ std::string appDisplayName(const PwNode &node) {
     if (const std::string discord = discordFromProcessTree(n.processId); !discord.empty())
         return discord;
 
+    // The program's own launcher entry, ahead of what the stream calls itself:
+    // an app built on Chromium's embedded framework says "Chromium" whatever
+    // it is, and its executable is still its own.
+    if (const auto entry = desktopEntryForProcess(n.processId, n.processBinary))
+        return entry->name;
+
     const std::string raw = rawAppName(n);
 
     if (!raw.empty() && !isGenericName(raw)) {
@@ -433,6 +440,12 @@ std::string appDisplayName(const PwNode &node) {
 
     if (!raw.empty()) return prettifyBinaryName(fileBaseName(raw));
     return "Unknown application";
+}
+
+std::string appIconName(const PwNode &node) {
+    if (const auto entry = desktopEntryForProcess(node.processId, node.processBinary))
+        return entry->icon;
+    return {};
 }
 
 std::string appMergeKey(const PwNode &node) {

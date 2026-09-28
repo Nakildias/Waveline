@@ -150,7 +150,7 @@ ChannelStrip::ChannelStrip(const QString &id, const QString &name, QWidget *pare
     // so switching NC on visibly drops the floor between words.
     micMeter_ = new LevelMeter(Qt::Horizontal, this);
     micMeter_->setThickness(3);
-    micMeter_->setTint(Theme::Line);
+    micMeter_->setTint(Theme::Inactive);
     micMeter_->setToolTip(
         tr("This channel publishes no microphone.\n"
            "Turn one on in the effects panel to meter it here."));
@@ -561,10 +561,10 @@ void ChannelStrip::setIdentityBadge(const QString &iconName, const QColor &color
     iconName_ = iconName;
     // Re-applied on every refresh pass, so it has to honour the grey a
     // disconnected device is wearing rather than paint over it.
-    const QColor shown = deviceConnected_ ? color : Theme::Line;
+    const QColor shown = deviceConnected_ ? color : Theme::Inactive;
     setTopStripe(shown);
     if (meter_) meter_->setTint(mainMeterActive_ && deviceConnected_ ? color
-                                                                    : Theme::Line);
+                                                                    : Theme::Inactive);
     if (monitor_.fader) monitor_.fader->setAccent(shown);
     if (stream_.fader) stream_.fader->setAccent(shown);
     if (gain_.fader) gain_.fader->setAccent(shown);
@@ -582,18 +582,18 @@ void ChannelStrip::setIdentityBadge(const QString &iconName, const QColor &color
 // says only "something has focus", not which card you are renaming.
 void ChannelStrip::applyTitleEditAccent() {
     if (!titleEdit_) return;
-    const QColor accent = deviceConnected_ ? color_ : Theme::Line;
+    const QColor accent = deviceConnected_ ? color_ : Theme::Inactive;
     titleEdit_->setStyleSheet(
         QStringLiteral("QLineEdit { background: %1; border: 1px solid %2; "
                        "border-radius: 6px; padding: 2px 6px; "
                        "selection-background-color: %3; }"
                        "QLineEdit:focus { border-color: %4; }")
-            .arg(Theme::Well.name(), Theme::Line.name(),
+            .arg(Theme::css(Theme::Well), Theme::css(Theme::Line),
                  accentTint(accent, 90).name(QColor::HexArgb), accent.name()));
 }
 
 void ChannelStrip::applyAccentToToggles() {
-    const QColor shown = deviceConnected_ ? color_ : Theme::Line;
+    const QColor shown = deviceConnected_ ? color_ : Theme::Inactive;
     if (link_) link_->setAccent(shown);
     if (micMonitorButton_) micMonitorButton_->setAccent(shown);
     applyTitleEditAccent();
@@ -603,7 +603,7 @@ void ChannelStrip::setDeviceConnected(bool on) {
     if (on == deviceConnected_) return;
     deviceConnected_ = on;
 
-    const QColor shown = on ? color_ : Theme::Line;
+    const QColor shown = on ? color_ : Theme::Inactive;
     setTopStripe(shown);
     if (badgeTile_)
         static_cast<IconTile *>(badgeTile_)->setAppearance(iconName_, shown);
@@ -620,9 +620,9 @@ void ChannelStrip::setDeviceConnected(bool on) {
     // Tints only. The levels themselves are left alone: an unplugged
     // microphone reads silence on its own, and a bus that is still carrying
     // shared application audio should go on showing it.
-    if (meter_) meter_->setTint(mainMeterActive_ && on ? color_ : Theme::Line);
+    if (meter_) meter_->setTint(mainMeterActive_ && on ? color_ : Theme::Inactive);
     if (micMeter_)
-        micMeter_->setTint(micMeterActive_ && on ? Theme::Violet : Theme::Line);
+        micMeter_->setTint(micMeterActive_ && on ? Theme::Violet : Theme::Inactive);
 }
 
 void ChannelStrip::enableGainFader(bool on) {
@@ -770,7 +770,7 @@ void ChannelStrip::enableMicMonitorButton(bool on) {
         micMonitorButton_->setIconSize(17);
         // The card's own colour, so "I am hearing this one" is answered by the
         // same hue as the card it belongs to.
-        micMonitorButton_->setAccent(deviceConnected_ ? color_ : Theme::Line);
+        micMonitorButton_->setAccent(deviceConnected_ ? color_ : Theme::Inactive);
         micMonitorButton_->setToolTip(
             tr("Hear this channel's published microphone in the Monitor mix.\n"
                "Software only: there is no hardware monitor for a channel mic."));
@@ -1042,7 +1042,7 @@ void ChannelStrip::setLevel(double fraction) {
 void ChannelStrip::setMainMeterActive(bool on) {
     if (on == mainMeterActive_) return;
     mainMeterActive_ = on;
-    meter_->setTint(on && deviceConnected_ ? color_ : Theme::Line);
+    meter_->setTint(on && deviceConnected_ ? color_ : Theme::Inactive);
     if (!on) meter_->setLevel(0.0);
 }
 
@@ -1058,7 +1058,7 @@ void ChannelStrip::setMicLevel(double fraction) {
 void ChannelStrip::setMicMeterActive(bool on) {
     if (on == micMeterActive_) return;
     micMeterActive_ = on;
-    micMeter_->setTint(on && deviceConnected_ ? Theme::Violet : Theme::Line);
+    micMeter_->setTint(on && deviceConnected_ ? Theme::Violet : Theme::Inactive);
     // Not on the microphone card, whose caption is set once and is always true.
     if (!micMeterTipFixed_)
         micMeter_->setToolTip(

@@ -269,7 +269,7 @@ QList<OutputInfo> MixerClient::outputs() const {
 
 QList<AppInfo> MixerClient::apps() const {
     QList<AppInfo> out;
-    // "nodeId\tname\tchannel" per entry.
+    // "nodeId\tname\tchannel\tvolume\ticon" per entry.
     for (const QString &row : get<QStringList>("Apps")) {
         const QStringList f = row.split(QLatin1Char('\t'));
         if (f.size() < 2) continue;
@@ -278,6 +278,7 @@ QList<AppInfo> MixerClient::apps() const {
         a.name = f[1];
         a.channelId = f.size() > 2 ? f[2] : QString();
         a.volume = f.size() > 3 ? f[3].toDouble() : 1.0;
+        a.icon = f.size() > 4 ? f[4] : QString();
         out.push_back(a);
     }
     return out;

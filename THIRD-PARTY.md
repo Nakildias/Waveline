@@ -15,6 +15,8 @@ packaging this, can comply without having to re-derive it.
 | [FluidSynth](https://www.fluidsynth.org/) | LGPL-2.1-or-later | yes (see below) | installed from your distribution by `install.sh`, copied into `app/lib/` for the build, and `dlopen`ed at runtime; **not** redistributed here |
 | [dr_wav / dr_mp3](https://github.com/mackron/dr_libs) | Unlicense **or** MIT-0 (dual) | yes | **copied into this repository** under `app/lib/thirdparty/`, and compiled into `wavelined` |
 | [Tabler Icons](https://github.com/tabler/tabler-icons) | MIT | yes | **copied into this repository** under `app/src/icons/`, and compiled into `waveline-mixer` |
+| [Breeze](https://invent.kde.org/plasma/breeze) `BoxShadowRenderer` | GPL-2.0-or-later | yes (same licence) | **copied into this repository** under `app/src/ui/monarchy/`, and compiled into `waveline-mixer` only when KF6 WindowSystem is found |
+| [KWindowSystem](https://invent.kde.org/frameworks/kwindowsystem) | LGPL-2.1-or-later | yes | optional; linked at build time against the system `libKF6WindowSystem` when present |
 | [PipeWire](https://pipewire.org/) | MIT | yes | linked at build time against the system `libpipewire-0.3` |
 | [Qt 6](https://www.qt.io/) | LGPL-3.0-only (open source) | see below | linked at build time against the system Qt |
 
@@ -198,6 +200,24 @@ any copy of this repository or of a binary built from it.
 
 MIT is GPL-compatible, so shipping them inside a GPL binary is fine as long as
 the notice is preserved.
+
+## Breeze's box shadow renderer, and KWindowSystem
+
+On Monarchy the mixer's window draws its own chrome instead of taking the
+desktop's decoration (see `app/src/ui/monarchy/`), which leaves it to hand
+KWin its own shadow. That shadow is rendered by
+`app/src/ui/monarchy/boxshadowrenderer.{h,cpp}`, Breeze's `BoxShadowRenderer`,
+© 2018 Vlad Zahorodnii, GPL-2.0-or-later -- the same licence as this project,
+and the same code Monarchy's window decoration draws its shadow with, so the
+two match. Its SPDX header is kept as it was.
+
+It is only compiled when KDE Frameworks' KWindowSystem (LGPL-2.1-or-later) is
+found at configure time, which the shadow and the blur behind the window are
+handed to KWin through. KWindowSystem is not redistributed here and is never a
+hard dependency: without it the mixer builds as before.
+
+The rest of `app/src/ui/monarchy/` is ported from Monarchy's own source tree,
+by the same author, under the same licence.
 
 ## dr_wav and dr_mp3
 

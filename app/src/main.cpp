@@ -3,11 +3,14 @@
 
 #include <QApplication>
 #include <QIcon>
+#include <QProcess>
 #include <QTimer>
 
 #include <cstdio>
 
 #include "ui/mainwindow.h"
+#include "ui/monarchy/desktop.h"
+#include "ui/monarchy/menus.h"
 #include "ui/theme.h"
 #include "version.h"
 
@@ -30,7 +33,18 @@ int main(int argc, char **argv) {
     QGuiApplication::setDesktopFileName(QStringLiteral("waveline-mixer"));
     QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("waveline-mixer")));
 
+    // The look first: Theme::apply() already depends on it, for the accent.
+    const QStringList args = QApplication::arguments();
+    for (int i = 1; i + 1 < args.size(); ++i) {
+        // --look universal, or --look monarchy. See ui/monarchy/desktop.h.
+        // Not --style: QApplication takes that one for itself and removes it.
+        if (args[i] == QLatin1String("--look"))
+            Monarchy::setActive(args[i + 1] == QLatin1String("monarchy"));
+    }
+
     Theme::apply();
+    // On Monarchy, every menu and dropdown is the desktop's own.
+    Monarchy::useShellMenus();
 
     // --screenshot renders the window once and exits. Works under
     // QT_QPA_PLATFORM=offscreen, so the layout can be checked without a
@@ -39,7 +53,6 @@ int main(int argc, char **argv) {
     bool shootTuner = false;
     int scroll = 0;
     int width = 0, height = 0;
-    const QStringList args = QApplication::arguments();
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == QLatin1String("--screenshot") && i + 1 < args.size())
             shot = args[i + 1];
@@ -54,6 +67,23 @@ int main(int argc, char **argv) {
             width = args[i + 1].toInt();
             height = args[i + 2].toInt();
         }
+    }
+
+    // Monarchy switching between light and dark while the mixer is open: the
+    // window reopens itself in the new scheme. Restyling in place leaves
+    // everything that copied a colour when it was built -- cards, icons,
+    // strips -- in the old one, which on a light window is a grey smear.
+    // Nothing is lost by it: the mixer's state is the daemon's, and the
+    // window's own (panels, card order) is saved as it changes.
+    if (Monarchy::isActive() && shot.isEmpty()) {
+        const bool startedLight = Monarchy::isLight();
+        QObject::connect(&Monarchy::Settings::instance(), &Monarchy::Settings::changed,
+                         &app, [startedLight] {
+            if (Monarchy::isLight() == startedLight) return;
+            QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                    QCoreApplication::arguments().mid(1));
+            QCoreApplication::quit();
+        });
     }
 
     MainWindow w;

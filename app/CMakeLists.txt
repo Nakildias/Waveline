@@ -76,6 +76,7 @@ add_library(wavelineengine STATIC
     src/engine/approuter.cpp
     src/engine/steamdetector.cpp
     src/engine/appidentity.cpp
+    src/engine/desktopentries.cpp
     src/engine/soundboardengine.cpp
     src/engine/soundsharerouter.cpp
     src/engine/levelprobe.cpp
@@ -238,6 +239,14 @@ qt_add_executable(waveline-mixer
     src/ui/tunerwindow.h
     src/ui/companionwindow.cpp
     src/ui/companionwindow.h
+    # Monarchy's window chrome, worn only when running on Monarchy -- see
+    # src/ui/monarchy/desktop.h. Plain Qt, so it builds everywhere.
+    src/ui/monarchy/desktop.cpp
+    src/ui/monarchy/desktop.h
+    src/ui/monarchy/chrome.cpp
+    src/ui/monarchy/chrome.h
+    src/ui/monarchy/menus.cpp
+    src/ui/monarchy/menus.h
 )
 target_include_directories(waveline-mixer PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -286,6 +295,8 @@ qt_add_resources(waveline-mixer "waveline-icons"
         src/icons/system.svg
         src/icons/sfx.svg
         src/icons/trash.svg
+        src/icons/tuning-fork.svg
+        src/icons/world.svg
         src/icons/x.svg
         src/icons/video.svg
         src/icons/voice.svg
@@ -303,6 +314,21 @@ qt_add_resources(waveline-mixer "waveline-icons"
 )
 target_link_libraries(waveline-mixer PRIVATE
     wavelineprofile Qt6::Core Qt6::Widgets Qt6::DBus Qt6::Svg Qt6::Network)
+
+# KWindowSystem gives the Monarchy look its blur and the decoration's shadow,
+# which a frameless window has to hand KWin itself. Optional: without it the
+# mixer still builds and still wears the chrome, just flat on the desktop.
+# Monarchy ships it; nothing else needs it, so it is never a hard dependency.
+find_package(KF6WindowSystem QUIET)
+if(KF6WindowSystem_FOUND)
+    target_sources(waveline-mixer PRIVATE
+        # Breeze's shadow renderer, the same one the desktop's decoration
+        # draws its shadow with (GPL-2.0-or-later, KDE).
+        src/ui/monarchy/boxshadowrenderer.cpp
+        src/ui/monarchy/boxshadowrenderer.h)
+    target_compile_definitions(waveline-mixer PRIVATE WAVELINE_HAVE_KWINDOWSYSTEM=1)
+    target_link_libraries(waveline-mixer PRIVATE KF6::WindowSystem)
+endif()
 
 install(TARGETS wavelined waveline-mixer wavelined-cli waveline-probe waveline-graph waveline-nc
         RUNTIME DESTINATION bin)

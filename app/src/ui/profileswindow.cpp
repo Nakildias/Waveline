@@ -22,6 +22,7 @@
 #include <QVBoxLayout>
 
 #include "mixerclient.h"
+#include "monarchy/chrome.h"
 #include "theme.h"
 
 namespace {
@@ -210,6 +211,9 @@ ProfilesWindow::ProfilesWindow(MixerClient *client, QWidget *parent)
     tf.setPointSizeF(tf.pointSizeF() * 1.2);
     title->setFont(tf);
     outer->addWidget(title);
+    // On Monarchy the window's header carries its name, so the heading in the
+    // window would say it twice.
+    if (Monarchy::WindowChrome::adopt(this, outer)) title->hide();
 
     auto *blurb = dimLabel(
         tr("A profile is a whole mixer setup: levels, mutes, routing and "
@@ -349,7 +353,7 @@ QWidget *ProfilesWindow::buildRow(const QString &name, bool active) {
     lay->setContentsMargins(10, 8, 8, 8);
     lay->setSpacing(10);
 
-    lay->addWidget(accentBar(active ? Theme::Accent : Theme::Line, row));
+    lay->addWidget(accentBar(active ? Theme::Accent : Theme::Inactive, row));
 
     auto *label = new QLabel(name, row);
     QFont lf = label->font();

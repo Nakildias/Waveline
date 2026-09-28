@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <QColor>
 #include <QHash>
 #include <QMainWindow>
 #include <QStringList>
@@ -38,6 +39,7 @@ class VirtualRackWindow;
 class TunerWindow;
 class Section;
 class ToggleSwitch;
+class QAbstractButton;
 class QComboBox;
 class QGridLayout;
 class QHBoxLayout;
@@ -94,9 +96,29 @@ private slots:
 private:
     void followScreen();
     QWidget *buildHeader();
+    // The same header in Monarchy's own shape, for when the window wears that
+    // desktop's chrome (see ui/monarchy/desktop.h): the traffic lights, the
+    // mixer's name, and the header buttons as icons in rounded pills. The
+    // header is the titlebar there, so it also drags the window.
+    QWidget *buildMonarchyHeader();
+    // The header's destinations as icons in Monarchy's toolbar pills, used by
+    // both headers. `chrome` is the colour behind the pills.
+    void addHeaderPills(QWidget *bar, QHBoxLayout *lay, const QColor &chrome);
+    // Monarchy's global menu bar reads an ordinary QMenuBar, so the window
+    // gets one there -- the header's destinations, by name, at the top of the
+    // screen. Not built in the universal look, which has never had one.
+    void buildMonarchyMenuBar();
+    // The translucent tint, the pills and the toolbar glyphs; re-run when
+    // Monarchy's window opacity setting moves.
+    void applyMonarchyStyle();
     QWidget *buildInputs();
     QWidget *buildOutputs();
     QWidget *buildSidebar();
+    // The Application Settings sidebar is laid over the right-hand end of the
+    // row of cards rather than beside it: this places it, pads the row and
+    // Outputs by the room it takes, and masks the cards out from under its
+    // card so they show only through its rounded corners.
+    void layoutSidebarOverlay();
     Section *buildSoundSharingSection();
     Section *buildHardwareSection();
 
@@ -161,17 +183,24 @@ private:
     // rather than the sidebar because it is machine-wide and affects every
     // strip at once -- a sidebar full of per-microphone settings is the wrong
     // neighbourhood for the one control that changes all of them.
-    QPushButton *diagnosticsBtn_ = nullptr;
+    // QAbstractButton rather than QPushButton: in Monarchy's look these are the
+    // toolbar's icon buttons, which are QToolButtons.
+    QAbstractButton *diagnosticsBtn_ = nullptr;
     // Settings: latency, warnings, services and the measured latency table.
     // Created
     // on first use and kept, so it reopens on the tab it was left on.
     SettingsWindow *settingsWindow_ = nullptr;
-    QPushButton *manageProfiles_ = nullptr;
-    QPushButton *tunerBtn_ = nullptr;
-    QPushButton *soundboardBtn_ = nullptr;
-    QPushButton *companionBtn_ = nullptr;
-    QPushButton *aboutBtn_ = nullptr;
+    QAbstractButton *manageProfiles_ = nullptr;
+    QAbstractButton *tunerBtn_ = nullptr;
+    QAbstractButton *soundboardBtn_ = nullptr;
+    QAbstractButton *companionBtn_ = nullptr;
+    QAbstractButton *aboutBtn_ = nullptr;
     QLabel *versionLabel_ = nullptr;
+    // Monarchy's look only: the tinted central widget whose margin is the
+    // resize strip, and the header row that stands in for a titlebar.
+    QWidget *monarchyCentral_ = nullptr;
+    QWidget *monarchyHeader_ = nullptr;
+    QLabel *monarchyTitle_ = nullptr;
     QLabel *bannerLabel_ = nullptr;
     // One row per program taking streams off their channels. Rebuilt only when
     // the set changes: this is driven by the same poll as everything else, and
@@ -184,6 +213,11 @@ private:
 
     // --------------------------------------------------------------- inputs
     QHBoxLayout *stripRow_ = nullptr;
+    QWidget *bodyWidget_ = nullptr;
+    CardBase *inputsWell_ = nullptr;
+    Section *sidebarCard_ = nullptr;
+    QVBoxLayout *outputsLayout_ = nullptr;
+    bool inOverlayLayout_ = false;
     QLabel *emptyLabel_ = nullptr;
     QWidget *inputsSeparator_ = nullptr;
     QPushButton *addMasterBtn_ = nullptr;
