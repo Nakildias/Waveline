@@ -49,13 +49,14 @@ struct Signal {
         s.cycles.fetch_add(1);
     }
 
-    Signal(const char *name, bool produce) : source(produce) {
+    Signal(const char *name, bool produce, bool capture = false) : source(produce) {
         std::string error;
         require(FilterHost::start(error), error);
         auto *loop = FilterHost::loop();
         pw_thread_loop_lock(loop);
         filter = pw_filter_new(FilterHost::core(), name, pw_properties_new(
-            "node.name", name, "media.type", "Audio", "media.class", "Stream/Filter/Audio",
+            "node.name", name, "media.type", "Audio", "media.class",
+            capture ? "Audio/Source" : "Stream/Filter/Audio",
             "node.autoconnect", "false", "node.want-driver", "true",
             "audio.rate", "48000", nullptr));
         require(filter, "create signal node");
@@ -65,6 +66,7 @@ struct Signal {
         pw_filter_add_listener(filter, &listener, &events, this);
         for (int ch = 0; ch < 2; ++ch) {
             const char *port = source ? (ch ? "output_FR" : "output_FL") : (ch ? "input_FR" : "input_FL");
+            if (capture) port = ch ? "capture_FR" : "capture_FL";
             ports[ch] = pw_filter_add_port(filter, source ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
                 PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0,
                 pw_properties_new("format.dsp", "32 bit float mono audio", "port.name", port, nullptr), nullptr, 0);
@@ -82,6 +84,48 @@ struct Signal {
 
 int main() {
     require(std::getenv("WAVELINE_TEST_SESSION"), "Run using isolated_pipewire_test.py, never a live session");
+    {
+        PwEngine engine;
+        std::string error;
+        require(engine.start(error), error);
+        Signal source("alsa_input.issue9-default-mic", true, true);
+        require(engine.waitForPort("alsa_input.issue9-default-mic", "capture_FL", true, 5000),
+                "default capture source missing");
+        MixerGraph graph(engine);
+        require(graph.build(error, false), error);
+        auto *bus = graph.masterBus("mic");
+        require(bus && bus->captureMatch.empty(), "test must follow default input");
+        // Match the recovery quiet phase: the runtime node is deliberately
+        // cleared, but an empty saved match must still recover the default.
+        graph.silenceMasterCapture("mic");
+        engine.forgetLinksForNode(bus->captureNode);
+        bus->captureNode.clear();
+        require(graph.primeMasterHwCapture("mic", error), error);
+        require(bus->captureNode == "alsa_input.issue9-default-mic",
+                "default input was skipped during capture warm-up");
+        const auto *oldSelector = bus->chain.selector.get();
+        const auto instance = oldSelector->health().instance;
+        bus->captureNode.clear();
+        require(graph.rebuildMasterHwCapture("mic", error), error);
+        require(bus->chain.selector && bus->chain.selector->health().instance != instance,
+                "default input rebuild reported success without rebuilding");
+        require(bus->captureMatch.empty(), "recovery pinned the default microphone");
+        require(bus->captureNode == "alsa_input.issue9-default-mic",
+                "default microphone was not reconnected");
+        require(graph.verifyMasterMixWiring("mic", error), error);
+        Signal tap("test-default-capture-tap", false);
+        require(engine.waitForPort("waveline-mic", "capture_MONO", true, 5000),
+                "rebuilt microphone output missing");
+        require(engine.waitForPort("test-default-capture-tap", "input_FL", false, 5000),
+                "capture test tap missing");
+        require(engine.linkPorts("waveline-mic", "capture_MONO",
+                                 "test-default-capture-tap", "input_FL", error), error);
+        std::this_thread::sleep_for(500ms);
+        const auto cycles = tap.cycles.load();
+        std::this_thread::sleep_for(150ms);
+        require(tap.cycles.load() > cycles && tap.energy[0].load() > 0.001f,
+                "rebuilt default microphone has links but carries no signal");
+    }
     {
         PwEngine engine;
         std::string error;

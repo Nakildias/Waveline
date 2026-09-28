@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>  // strcasecmp
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -30,10 +31,44 @@
 namespace waveline {
 namespace {
 
+// A loopback can take itself down: module-loopback schedules its own destroy
+// when one of its streams goes unconnected, which is what happens when its
+// target device vanishes (USB reset, unplug). Holding a bare pointer left it
+// dangling, and the removePath() that followed the hardware-gone event freed
+// the module a second time -- the daemon segfaulted on every Wave:3 reset. The
+// listener clears the pointer the moment PipeWire destroys the module, by
+// whichever route. Shared because Path is copied (setPathTarget).
+struct ModuleRef {
+    pw_impl_module *module = nullptr;
+    spa_hook listener{};
+
+    explicit ModuleRef(pw_impl_module *m) : module(m) {
+        static const pw_impl_module_events events = {
+            .version = PW_VERSION_IMPL_MODULE_EVENTS,
+            .destroy = [](void *data) {
+                auto *self = static_cast<ModuleRef *>(data);
+                spa_hook_remove(&self->listener);
+                self->module = nullptr;
+            },
+        };
+        pw_impl_module_add_listener(module, &listener, &events, this);
+    }
+    ~ModuleRef() {
+        if (module) spa_hook_remove(&listener);
+    }
+    ModuleRef(const ModuleRef &) = delete;
+    ModuleRef &operator=(const ModuleRef &) = delete;
+
+    // Loop lock held.
+    void destroy() {
+        if (module) pw_impl_module_destroy(module);  // listener nulls it
+    }
+};
+
 // Loopback modules created by addPath. Volume lives on the *capture* side node
 // so that changing it does not disturb the link to the target.
 struct Path {
-    pw_impl_module *module = nullptr;
+    std::shared_ptr<ModuleRef> module;
     std::string captureName;   // node we set volume on
     std::string target;
     float volume = 1.0f;
@@ -870,7 +905,7 @@ void PwEngine::stop() {
         // Destroy paths before sinks: a loopback whose target vanished first
         // logs errors on the way out.
         for (auto &[name, p] : d_->paths)
-            if (p.module) pw_impl_module_destroy(p.module);
+            if (p.module) p.module->destroy();
         d_->paths.clear();
         for (auto &[_, link] : d_->manualLinks) pw_proxy_destroy(link);
         d_->manualLinks.clear();
@@ -1015,7 +1050,7 @@ bool PwEngine::removePath(const std::string &handle) {
     // loop thread to apply deferred volumes, and erasing from under it is how
     // you get a crash that only happens while re-targeting the monitor mix.
     pw_thread_loop_lock(d_->loop);
-    if (it->second.module) pw_impl_module_destroy(it->second.module);
+    if (it->second.module) it->second.module->destroy();
     d_->paths.erase(it);
     pw_thread_loop_unlock(d_->loop);
     return true;
@@ -1137,7 +1172,7 @@ bool PwEngine::addPath(const PathSpec &spec, std::string &error) {
                                      args.c_str(), nullptr);
     if (m) {
         Path p;
-        p.module = m;
+        p.module = std::make_shared<ModuleRef>(m);
         p.captureName = capName;
         p.target = spec.target;
         p.source = spec.source;
@@ -1263,7 +1298,7 @@ bool PwEngine::setPathTarget(const std::string &handle, const std::string &targe
     // recreating the module. Cheap, and it keeps one code path for both.
     const Path old = it->second;
     pw_thread_loop_lock(d_->loop);
-    if (old.module) pw_impl_module_destroy(old.module);
+    if (old.module) old.module->destroy();
     pw_thread_loop_unlock(d_->loop);
     d_->paths.erase(it);
 

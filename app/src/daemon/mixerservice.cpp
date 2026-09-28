@@ -955,11 +955,25 @@ QString MixerService::effectiveMasterCaptureMatch(const QString & /*masterId*/,
     return configMatch;
 }
 
-bool MixerService::masterHasWave3Hw(const QString &masterId) const {
+QString MixerService::masterCaptureIdentity(const QString &masterId) const {
     const MasterBusState *m = masterBusState(config_.live(), masterId);
-    if (!m || m->busType == QLatin1String("midi")) return false;
-    const QString match = effectiveMasterCaptureMatch(masterId, m->captureMatch);
-    return match.startsWith(QLatin1String(waveline::kWave3CapturePrefix));
+    if (!m || m->busType == QLatin1String("midi")) return {};
+    if (!m->captureMatch.isEmpty()) return m->captureMatch;
+    // An empty primary match means follow the default, not "no microphone".
+    // Resolve identity separately: putting this in effectiveMasterCaptureMatch
+    // would persist the current default and silently pin future selections.
+    if (graph_ && masterId == QLatin1String("mic")) {
+        if (const auto *bus = graph_->masterBus(masterId.toStdString());
+            bus && !bus->captureNode.empty())
+            return QString::fromStdString(bus->captureNode);
+        return QString::fromStdString(graph_->findCaptureNode({}));
+    }
+    return {};
+}
+
+bool MixerService::masterHasWave3Hw(const QString &masterId) const {
+    return masterCaptureIdentity(masterId).startsWith(
+        QLatin1String(waveline::kWave3CapturePrefix));
 }
 
 bool MixerService::isCaptureDeviceNode(const std::string &name) const {
@@ -1474,8 +1488,9 @@ bool MixerService::scheduleCaptureSettle(const QStringList &masterIds) {
     QStringList ids = masterIds;
     if (ids.isEmpty()) {
         for (const auto &bus : graph_->masterBuses()) {
-            if (bus.busType != "midi" && !bus.captureMatch.empty() &&
-                !graph_->findCaptureNode(bus.captureMatch).empty())
+            const QString match = masterCaptureIdentity(QString::fromStdString(bus.id));
+            if (bus.busType != "midi" && !match.isEmpty() &&
+                !graph_->findCaptureNode(match.toStdString()).empty())
                 ids.append(QString::fromStdString(bus.id));
         }
     }
@@ -1493,7 +1508,7 @@ QStringList MixerService::mastersForCaptureNode(const QString &nodeName) const {
     QStringList out;
     if (nodeName.isEmpty()) return out;
     for (const MasterBusState &m : config_.live().masterBuses) {
-        const QString match = effectiveMasterCaptureMatch(m.id, m.captureMatch);
+        const QString match = masterCaptureIdentity(m.id);
         if (!match.isEmpty() && nodeName.startsWith(match)) out << m.id;
     }
     return out;
@@ -1907,13 +1922,13 @@ void MixerService::wireCaptureDevicesThatAppeared() {
         const std::string sid = m.id.toStdString();
         const waveline::MasterBusRuntime *bus = graph_->masterBus(sid);
         if (!bus || !bus->captureNode.empty()) continue;
-        const QString match = effectiveMasterCaptureMatch(m.id, m.captureMatch);
+        const QString match = masterCaptureIdentity(m.id);
         if (match.isEmpty()) continue;
         if (graph_->findCaptureNode(match.toStdString()).empty()) continue;
         qInfo("waveline: capture for master '%s' appeared during startup -- "
               "wiring it now",
               qUtf8Printable(m.id));
-        graph_->setMasterCaptureMatch(sid, match.toStdString());
+        graph_->setMasterCaptureMatch(sid, m.captureMatch.toStdString());
         // Same warm-up then settled rebuild the hotplug path uses.
         std::string primeErr;
         if (!graph_->primeMasterHwCapture(sid, primeErr)) {
@@ -2440,6 +2455,7 @@ void MixerService::followDefaultSource() {
     }
     qInfo("waveline: default input changed, microphone is now '%s'",
           graph_->micNode().empty() ? "(none)" : graph_->micNode().c_str());
+    markMasterDisconnected(QStringLiteral("mic"));
     // The gain and mute belong to the microphone, not to the device that
     // happened to be there before it. A new one arrives at whatever level the
     // system left it at, so push ours onto it.
@@ -2450,6 +2466,8 @@ void MixerService::followDefaultSource() {
     // knows all of those. Debounced, so flipping through devices in the sound
     // settings rebuilds once at the end rather than once per click.
     scheduleRewire();
+    if (captureHotplugArmed_ && !graph_->micNode().empty())
+        scheduleCaptureSettle({QStringLiteral("mic")});
     emit Changed();
 }
 
@@ -2636,6 +2654,7 @@ void MixerService::handleHardwareNodeGone(const waveline::PwNode &n) {
         // toggling it off and on.
         for (const QString &id : ids) {
             captureHealOnAppear_.insert(id);
+            markMasterDisconnected(id);
             graph_->silenceMasterCapture(id.toStdString());
             if (auto *bus = graph_->masterBus(id.toStdString())) {
                 bus->captureNode.clear();
@@ -3011,8 +3030,7 @@ void MixerService::pollMasterHardware(const QString &masterId) {
         hw.backoffTicks = std::min(4 * hw.failStreak, 40);
     };
 
-    const std::string prefix =
-        effectiveMasterCaptureMatch(masterId, m->captureMatch).toStdString();
+    const std::string prefix = masterCaptureIdentity(masterId).toStdString();
     if (prefix.empty() && masterId != QLatin1String("mic")) {
         markMasterDisconnected(masterId);
         backOff();

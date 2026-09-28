@@ -894,6 +894,7 @@ private:
     void sampleCaptureDelays();
     QString effectiveMasterCaptureMatch(const QString &masterId,
                                         const QString &configMatch) const;
+    QString masterCaptureIdentity(const QString &masterId) const;
     void pollMasterHardware(const QString &masterId);
     void restoreMasterHardwareState(const QString &masterId, waveline::State &fresh);
     QString nextMasterId() const;

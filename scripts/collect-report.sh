@@ -361,7 +361,7 @@ else
 fi
 
 printf '\n--- this repo'"'"'s config files, as installed ---\n'
-for f in "$WPC" "$PWC"; do
+for f in "$WPC" "$CLK" "$DRV"; do
 	printf '\n>> %s\n' "$f"
 	[[ -f "$f" ]] && cat "$f" || echo "(not installed)"
 done

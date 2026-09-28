@@ -803,7 +803,7 @@ bool MixerGraph::primeMasterHwCapture(const std::string &id, std::string &error)
         error = "no such input device: " + id;
         return false;
     }
-    if (bus->captureMatch.empty()) return true;
+    if (bus->captureMatch.empty() && !isPrimaryMaster(id)) return true;
 
     bus->captureNode.clear();
     if (!waitForCaptureNode(*bus, 1000, error)) return false;
@@ -821,7 +821,7 @@ bool MixerGraph::relinkMasterHwCapture(const std::string &id, std::string &error
         error = "no such input device: " + id;
         return false;
     }
-    if (bus->captureMatch.empty()) return true;
+    if (bus->captureMatch.empty() && !isPrimaryMaster(id)) return true;
 
     bus->captureNode.clear();
     if (!waitForCaptureNode(*bus, 400, error)) return false;
@@ -859,7 +859,8 @@ bool MixerGraph::rebuildMasterHwCapture(const std::string &id, std::string &erro
         error = "no such input device: " + id;
         return false;
     }
-    if (bus->captureNode.empty() && bus->captureMatch.empty()) return true;
+    if (bus->captureNode.empty() && bus->captureMatch.empty() && !isPrimaryMaster(id))
+        return true;
 
     float preservedGain = 1.0f;
     if (bus->chain.gainReady && bus->chain.gain)
@@ -2984,7 +2985,7 @@ bool MixerGraph::syncMasterCaptureNode(MasterBusRuntime &bus) {
 
 bool MixerGraph::waitForCaptureNode(MasterBusRuntime &bus, int timeoutMs,
                                     std::string &error) {
-    if (bus.captureMatch.empty()) {
+    if (bus.captureMatch.empty() && !isPrimaryMaster(bus.id)) {
         bus.captureNode.clear();
         return true;
     }
@@ -2993,7 +2994,7 @@ bool MixerGraph::waitForCaptureNode(MasterBusRuntime &bus, int timeoutMs,
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (std::chrono::steady_clock::now() < deadline) {
         eng_.sync();
-        const std::string found = findCaptureNode(bus.captureMatch);
+        const std::string found = resolveMasterCaptureNode(bus);
         if (!found.empty()) {
             bus.captureNode = found;
             const std::string capPort = masterCapturePort(bus);

@@ -48,3 +48,10 @@ continued xruns; two automatic recoveries per ten minutes is the limit. Verify
 clean capture afterward and that other inputs stay audible. Also test a healthy
 session, isolated xruns, long uptime, and a manual rebuild during overload.
 Wave:3 hardware acceptance has not been performed as part of the code update.
+
+The graph regression also creates a synthetic default microphone with no saved
+`captureMatch`. It exercises warm-up and the same cleared-runtime-node state
+used by the daemon's quiet phase, then verifies that Rebuild replaces the
+selector, reconnects the microphone, and preserves default-following mode.
+Before the issue #9 fix, the test fails at default-input warm-up; manual
+recovery could also return success without rebuilding after clearing the node.
