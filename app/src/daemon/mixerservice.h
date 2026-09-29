@@ -372,6 +372,8 @@ public slots:
 
     bool MasterNoiseSuppression(const QString &masterId) const;
     void SetMasterNoiseSuppression(const QString &masterId, bool on);
+    // Always 1.0, and setting it does nothing: noise suppression is on or off.
+    // Kept for callers written when it was a strength. See NoiseFilter.
     double MasterNoiseIntensity(const QString &masterId) const;
     void SetMasterNoiseIntensity(const QString &masterId, double value);
     bool MasterSoftwareMonitor(const QString &masterId) const;
@@ -483,7 +485,7 @@ public slots:
     // Feed the Monitor mix from the processed chain instead of the dry tap.
     bool MicMonitorFx() const;
     void SetMicMonitorFx(bool on);
-    // 0..1, how much of the denoised signal is used. See NoiseFilter.
+    // Always 1.0, and setting it does nothing -- see MasterNoiseIntensity().
     double NoiseIntensity() const;
     void SetNoiseIntensity(double value);
     double NoiseInputLevel() const;
@@ -555,6 +557,7 @@ public slots:
                                  const QString &stage) const;
     void SetChannelNoiseSuppression(const QString &channelId, const QString &stage,
                                     bool on);
+    // Always 1.0, and setting it does nothing -- see MasterNoiseIntensity().
     double ChannelNoiseIntensity(const QString &channelId,
                                  const QString &stage) const;
     void SetChannelNoiseIntensity(const QString &channelId, const QString &stage,

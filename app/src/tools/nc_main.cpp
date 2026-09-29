@@ -35,9 +35,8 @@ double rms(const std::vector<float> &v) {
 }
 
 // Runs a buffer through RNNoise exactly the way the filter does, including the
-// int16 scaling and the dry/wet blend, so the two cannot drift apart.
-std::vector<float> denoise(const std::vector<float> &in, bool int16Scale,
-                           float wet = 1.0f) {
+// int16 scaling, so the two cannot drift apart.
+std::vector<float> denoise(const std::vector<float> &in, bool int16Scale) {
     DenoiseState *st = rnnoise_create(nullptr);
     const int frame = rnnoise_get_frame_size();
     std::vector<float> out;
@@ -47,10 +46,7 @@ std::vector<float> denoise(const std::vector<float> &in, bool int16Scale,
         for (int j = 0; j < frame; ++j)
             a[j] = int16Scale ? in[i + j] * 32768.0f : in[i + j];
         rnnoise_process_frame(st, b.data(), a.data());
-        for (int j = 0; j < frame; ++j) {
-            const float denoised = int16Scale ? b[j] / 32768.0f : b[j];
-            out.push_back(denoised * wet + in[i + j] * (1.0f - wet));
-        }
+        for (int j = 0; j < frame; ++j) out.push_back(int16Scale ? b[j] / 32768.0f : b[j]);
     }
     rnnoise_destroy(st);
     return out;
@@ -86,24 +82,7 @@ int selftest() {
     std::printf("denoised, WRONG -1..1 scale: %.6f  (%.1f dB)\n", rBad,
                 rBad > 0 ? 20 * std::log10(rIn / rBad) : 99.0);
 
-    // The intensity control is a dry/wet blend, so 0.0 must be bit-identical
-    // to the input and 1.0 must be the fully denoised signal. Checked because
-    // "it sounds different" is not something a live level reading can settle
-    // when the input is speech and therefore never stationary.
-    std::printf("\nintensity blend:\n");
-    bool blendOk = true;
-    for (float wet : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
-        const auto mixed = denoise(in, true, wet);
-        const double r = rms(tail(mixed));
-        std::printf("  wet %.2f -> rms %.6f  (%.1f dB vs input)\n", wet, r,
-                    r > 0 ? 20 * std::log10(r / rIn) : -99.0);
-        if (wet == 0.0f && std::abs(r - rIn) > 1e-6) blendOk = false;
-    }
-    std::printf("  %s\n", blendOk
-                              ? "0.00 reproduces the input exactly, as it must"
-                              : "FAIL: 0.00 is not a clean passthrough");
-
-    const bool ok = rOk < rIn * 0.5 && blendOk;
+    const bool ok = rOk < rIn * 0.5;
     std::printf("\n%s\n", ok ? "PASS: noise is suppressed with int16 scaling"
                              : "FAIL: no meaningful suppression -- check scaling");
     if (rBad > 0 && rOk > 0)

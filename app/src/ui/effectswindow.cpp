@@ -296,7 +296,6 @@ QVBoxLayout *makeEffectTabPage(QTabWidget *tabs, const QString &label) {
 void applyProcessingDefaults(ChannelEffectsWindow::StageControls &ui) {
     const ChannelFxInfo fx;
     QSignalBlocker b1(ui.noise);
-    QSignalBlocker b2(ui.intensity);
     QSignalBlocker b3(ui.lowCut);
     QSignalBlocker b4(ui.lowCutHz);
     QSignalBlocker b5(ui.eq);
@@ -304,7 +303,6 @@ void applyProcessingDefaults(ChannelEffectsWindow::StageControls &ui) {
     QSignalBlocker b7(ui.midDb);
     QSignalBlocker b8(ui.highDb);
     Q_UNUSED(b1);
-    Q_UNUSED(b2);
     Q_UNUSED(b3);
     Q_UNUSED(b4);
     Q_UNUSED(b5);
@@ -312,8 +310,6 @@ void applyProcessingDefaults(ChannelEffectsWindow::StageControls &ui) {
     Q_UNUSED(b7);
     Q_UNUSED(b8);
     ui.noise->setChecked(false);
-    ui.intensity->setValue(100);
-    ui.intensityLabel->setText(QStringLiteral("100%"));
     ui.lowCut->setChecked(fx.lowCut);
     ui.lowCutHz->setCurrentIndex(fx.lowCutHz == 120 ? 1 : 0);
     ui.eq->setChecked(fx.eq);
@@ -627,10 +623,6 @@ void addProcessingSection(const QString &ncTip, const QString &eqTip, QWidget *p
                          if (onDepsChanged) onDepsChanged();
                      });
 
-    lay->addWidget(sliderRow(QObject::tr("Strength"), ui.intensity, ui.intensityLabel,
-                             40, parent));
-    ui.intensity->setRange(0, 100);
-
     if (ncIn && ncOut) addNcMeters(parent, lay, *ncIn, *ncOut);
 
     lay->addWidget(switchRow(QObject::tr("Low-cut filter"),
@@ -728,8 +720,6 @@ MicDynamicsInfo dynamicsFromStageControls(const FxStageControls &ui) {
 
 void setStageControlsEnabled(FxStageControls &ui, bool on) {
     if (ui.noise) ui.noise->setEnabled(on);
-    if (ui.intensity) ui.intensity->setEnabled(on);
-    if (ui.intensityLabel) ui.intensityLabel->setEnabled(on);
     if (ui.lowCut) ui.lowCut->setEnabled(on);
     if (ui.lowCutHz) ui.lowCutHz->setEnabled(on);
     if (ui.eq) ui.eq->setEnabled(on);
@@ -773,8 +763,6 @@ void applyStageControlDependencies(FxStageControls &ui, bool editable,
     dep(ui.deEsserAmount, editable && deEss);
     dep(ui.deEsserAmountReadout, editable && deEss);
 
-    dep(ui.intensity, editable && nc);
-    dep(ui.intensityLabel, editable && nc);
     if (ncIn) ncIn->setEnabled(editable && nc);
     if (ncOut) ncOut->setEnabled(editable && nc);
 
@@ -973,7 +961,6 @@ void refreshMasterStage(MixerClient *client, const QString &masterId, FxStageCon
     const MicDynamicsInfo dyn = client->masterMicDynamics(masterId);
 
     QSignalBlocker b1(ui.noise);
-    QSignalBlocker b2(ui.intensity);
     QSignalBlocker b3(ui.lowCut);
     QSignalBlocker b4(ui.lowCutHz);
     QSignalBlocker b5(ui.eq);
@@ -990,9 +977,6 @@ void refreshMasterStage(MixerClient *client, const QString &masterId, FxStageCon
     QSignalBlocker b16(ui.limitThreshold);
 
     ui.noise->setChecked(client->masterNoiseSuppression(masterId));
-    const int pct = int(client->masterNoiseIntensity(masterId) * 100.0 + 0.5);
-    ui.intensity->setValue(pct);
-    ui.intensityLabel->setText(QStringLiteral("%1%").arg(pct));
 
     ui.lowCut->setChecked(fx.lowCut);
     ui.lowCutHz->setCurrentIndex(fx.lowCutHz == 120 ? 1 : 0);
@@ -1500,14 +1484,6 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
         applyMicDependencies();
     });
 
-    procLay->addWidget(sliderRow(tr("Strength"), intensity_, intensityLabel_, 40, micTab));
-    intensity_->setRange(0, 100);
-    intensity_->setToolTip(tr("How much of the denoised signal to use."));
-    connect(intensity_, &QSlider::valueChanged, this, [this](int v) {
-        intensityLabel_->setText(QStringLiteral("%1%").arg(v));
-        client_->setMasterNoiseIntensity(masterId_, v / 100.0);
-    });
-
     addNcMeters(micTab, procLay, noiseIn_, noiseOut_);
 
     addEqSection(
@@ -1642,8 +1618,6 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
         updating_ = true;
         applyProcessingDefaults(output_);
         updating_ = false;
-        client_->setChannelNoiseIntensity(QStringLiteral("mic"),
-                                          QStringLiteral("output"), 1.0);
         pushOutputSettings();
         pushEqMode(client_, false, QStringLiteral("mic"), QStringLiteral("output"), false);
         if (outputProEq_) outputProEq_->close();
@@ -1707,12 +1681,6 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
     buildMasterLufsLimiterUi(appTab, protLay, true);
     protLay->addStretch();
 
-    connect(output_.intensity, &QSlider::valueChanged, this, [this](int v) {
-        if (updating_ || !client_->available()) return;
-        output_.intensityLabel->setText(QStringLiteral("%1%").arg(v));
-        client_->setChannelNoiseIntensity(QStringLiteral("mic"), QStringLiteral("output"),
-                                          v / 100.0);
-    });
     tabs_->addTab(appTab, tr("App Audio"));
     }
 
@@ -1881,7 +1849,6 @@ void GlobalEffectsWindow::refresh() {
 
     updating_ = true;
     QSignalBlocker b1(noise_);
-    QSignalBlocker b2(intensity_);
     QSignalBlocker b3(micStereo_);
     QSignalBlocker b4(lowCut_);
     QSignalBlocker b5(lowCutHz_);
@@ -1899,9 +1866,6 @@ void GlobalEffectsWindow::refresh() {
     QSignalBlocker b17(limitThreshold_);
 
     noise_->setChecked(client_->masterNoiseSuppression(masterId_));
-    const int pct = int(client_->masterNoiseIntensity(masterId_) * 100.0 + 0.5);
-    intensity_->setValue(pct);
-    intensityLabel_->setText(QStringLiteral("%1%").arg(pct));
     micStereo_->setChecked(client_->masterMicStereo(masterId_));
 
     const ChannelFxInfo fx =
@@ -1943,8 +1907,6 @@ void GlobalEffectsWindow::refresh() {
     if (captureRowWidget_) captureRowWidget_->setVisible(!midi);
     if (midiPortRowWidget_) midiPortRowWidget_->setVisible(midi);
     if (noise_) noise_->setVisible(!midi);
-    if (intensity_) intensity_->setVisible(!midi);
-    if (intensityLabel_) intensityLabel_->setVisible(!midi);
     if (noiseIn_) noiseIn_->setVisible(!midi);
     if (noiseOut_) noiseOut_->setVisible(!midi);
     if (micEffectTabs_) {
@@ -2378,8 +2340,6 @@ MicDynamicsInfo GlobalEffectsWindow::dynamicsFromStage(const FxStageControls &ui
 void GlobalEffectsWindow::applyMicDependencies() {
     FxStageControls ui;
     ui.noise = noise_;
-    ui.intensity = intensity_;
-    ui.intensityLabel = intensityLabel_;
     ui.lowCut = lowCut_;
     ui.lowCutHz = lowCutHz_;
     ui.eq = eq_;
@@ -2684,7 +2644,6 @@ void GlobalEffectsWindow::refreshOutput() {
     const MicDynamicsInfo dyn = client_->channelDynamics(QStringLiteral("mic"), stage);
 
     QSignalBlocker b1(output_.noise);
-    QSignalBlocker b2(output_.intensity);
     QSignalBlocker b3(output_.lowCut);
     QSignalBlocker b4(output_.lowCutHz);
     QSignalBlocker b5(output_.eq);
@@ -2701,10 +2660,6 @@ void GlobalEffectsWindow::refreshOutput() {
     QSignalBlocker b16(output_.limitThreshold);
 
     output_.noise->setChecked(client_->channelNoiseSuppression(QStringLiteral("mic"), stage));
-    const int pct =
-        int(client_->channelNoiseIntensity(QStringLiteral("mic"), stage) * 100.0 + 0.5);
-    output_.intensity->setValue(pct);
-    output_.intensityLabel->setText(QStringLiteral("%1%").arg(pct));
     output_.lowCut->setChecked(fx.lowCut);
     output_.lowCutHz->setCurrentIndex(fx.lowCutHz == 120 ? 1 : 0);
     output_.eq->setChecked(fx.eq);
@@ -2809,7 +2764,6 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
         updating_ = true;
         applyProcessingDefaults(input_);
         updating_ = false;
-        client_->setChannelNoiseIntensity(channelId_, QStringLiteral("input"), 1.0);
         pushInputSettings();
         pushEqMode(client_, false, channelId_, QStringLiteral("input"), false);
         if (inputProEq_) inputProEq_->close();
@@ -2876,7 +2830,6 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
         updating_ = true;
         applyProcessingDefaults(output_);
         updating_ = false;
-        client_->setChannelNoiseIntensity(channelId_, QStringLiteral("output"), 1.0);
         pushOutputSettings();
         pushEqMode(client_, false, channelId_, QStringLiteral("output"), false);
         if (outputProEq_) outputProEq_->close();
@@ -2943,18 +2896,6 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
         if (on) tabs_->setCurrentIndex(0);
     });
 
-    connect(input_.intensity, &QSlider::valueChanged, this, [this](int v) {
-        if (updating_ || !client_->available()) return;
-        input_.intensityLabel->setText(QStringLiteral("%1%").arg(v));
-        client_->setChannelNoiseIntensity(channelId_, QStringLiteral("input"),
-                                          v / 100.0);
-    });
-    connect(output_.intensity, &QSlider::valueChanged, this, [this](int v) {
-        if (updating_ || !client_->available()) return;
-        output_.intensityLabel->setText(QStringLiteral("%1%").arg(v));
-        client_->setChannelNoiseIntensity(channelId_, QStringLiteral("output"),
-                                          v / 100.0);
-    });
 
     connect(client_, &MixerClient::changed, this, &ChannelEffectsWindow::refresh);
     Theme::onChange(this, [this] { refresh(); });
@@ -3150,11 +3091,7 @@ void ChannelEffectsWindow::applyMidiNoiseRule() {
 
     input_.noise->setToolTip(tip);
     if (!midi) return;
-    for (QWidget *w : {static_cast<QWidget *>(input_.noise),
-                       static_cast<QWidget *>(input_.intensity),
-                       static_cast<QWidget *>(input_.intensityLabel)}) {
-        if (w) w->setEnabled(false);
-    }
+    input_.noise->setEnabled(false);
     if (inputNoiseIn_) inputNoiseIn_->setEnabled(false);
     if (inputNoiseOut_) inputNoiseOut_->setEnabled(false);
 }
@@ -3334,7 +3271,6 @@ void ChannelEffectsWindow::refreshStageFrom(const QString &channelId, const QStr
     const MicDynamicsInfo dyn = client_->channelDynamics(channelId, stage);
 
     QSignalBlocker b1(ui.noise);
-    QSignalBlocker b2(ui.intensity);
     QSignalBlocker b3(ui.lowCut);
     QSignalBlocker b4(ui.lowCutHz);
     QSignalBlocker b5(ui.eq);
@@ -3351,9 +3287,6 @@ void ChannelEffectsWindow::refreshStageFrom(const QString &channelId, const QStr
     QSignalBlocker b16(ui.limitThreshold);
 
     ui.noise->setChecked(client_->channelNoiseSuppression(channelId, stage));
-    const int pct = int(client_->channelNoiseIntensity(channelId, stage) * 100.0 + 0.5);
-    ui.intensity->setValue(pct);
-    ui.intensityLabel->setText(QStringLiteral("%1%").arg(pct));
 
     ui.lowCut->setChecked(fx.lowCut);
     ui.lowCutHz->setCurrentIndex(fx.lowCutHz == 120 ? 1 : 0);

@@ -1040,7 +1040,6 @@ void MixerService::applyMasterFx(const QString &masterId) {
     if (auto *nc = graph_->masterNoiseFilter(id)) {
         const bool ncOn = on && m->noiseSuppression;
         nc->setEnabled(ncOn);
-        nc->setIntensity(static_cast<float>(m->noiseIntensity));
     }
     // Rack Mode swaps which Creative FX blob actually drives this device's
     // mic input chain; the Microphone > Creative tab's own blob is kept
@@ -2143,7 +2142,6 @@ Profile MixerService::snapshot() const {
         p.mic.streamVolume = micStreamLevel_;
         p.mic.streamMuted = micStreamMuted_;
         p.mic.monitorMuted = micMonitorMuted_;
-        if (auto *nc = graph_->noiseFilter()) p.noiseIntensity = nc->intensity();
         // The requested engine, not the running one: falling back to RNNoise
         // because DeepFilterNet was missing must not rewrite the user's choice.
         p.noiseEngine = QString::fromLatin1(
@@ -3321,23 +3319,13 @@ void MixerService::SetSoftwareMonitor(bool on) {
     emit Changed();
 }
 
-double MixerService::NoiseIntensity() const {
-    auto *nc = graph_ ? graph_->noiseFilter() : nullptr;
-    return nc ? nc->intensity() : 1.0;
-}
+// Noise suppression is on or off, always at full strength -- see
+// NoiseFilter. The strength calls stay on the bus so scripts and older clients
+// that use them keep working: every strength reads as full, and setting one
+// does nothing.
+double MixerService::NoiseIntensity() const { return 1.0; }
 
-void MixerService::SetNoiseIntensity(double value) {
-    if (!graph_) return;
-    Profile &p = config_.live();
-    const double v = qBound(0.0, value, 1.0);
-    if (qFuzzyCompare(p.noiseIntensity, v)) return;
-    p.noiseIntensity = v;
-    if (MasterBusState *m = masterBusState(p, QStringLiteral("mic")))
-        m->noiseIntensity = v;
-    applyMicFx();
-    scheduleSave();
-    emit Changed();
-}
+void MixerService::SetNoiseIntensity(double) {}
 
 QString MixerService::ChannelEffects(const QString &channelId,
                                      const QString &stage) const {
@@ -3459,8 +3447,7 @@ void MixerService::applyChannelFx(const QString &channelId) {
                     : waveline::DynamicsSettings{});
     graph_->setChannelCreativeFx(id, waveline::FxStage::Input, inputCreative);
     graph_->setChannelNoiseSuppression(id, waveline::FxStage::Input,
-                                       inputActive && input.noiseSuppression,
-                                       static_cast<float>(input.noiseIntensity));
+                                       inputActive && input.noiseSuppression);
 
     graph_->setChannelEffects(id, waveline::FxStage::Output, outputFx);
     graph_->setChannelDynamics(
@@ -3470,8 +3457,7 @@ void MixerService::applyChannelFx(const QString &channelId) {
            : waveline::DynamicsSettings{});
     graph_->setChannelCreativeFx(id, waveline::FxStage::Output, outputCreative);
     graph_->setChannelNoiseSuppression(id, waveline::FxStage::Output,
-                                       on && output.noiseSuppression,
-                                       static_cast<float>(output.noiseIntensity));
+                                       on && output.noiseSuppression);
     graph_->setChannelDucking(id, toDuckingSettings(duck));
     graph_->setChannelLufsLimiter(id, toLufsLimiterSettings(lufsCfg));
 }
@@ -4048,47 +4034,11 @@ void MixerService::SetChannelNoiseSuppression(const QString &channelId,
     emit Changed();
 }
 
-double MixerService::ChannelNoiseIntensity(const QString &channelId,
-                                           const QString &stage) const {
-    const Profile &p = config_.live();
-    if (channelId == QLatin1String("mic")) {
-        return parseFxStage(stage) == waveline::FxStage::Output
-                   ? p.masterOutput.noiseIntensity
-                   : p.noiseIntensity;
-    }
-    if (!graph_) return 1.0;
-    const auto it = p.channelEffects.constFind(channelId);
-    if (it == p.channelEffects.constEnd()) return 1.0;
-    return parseFxStage(stage) == waveline::FxStage::Output ? it->output.noiseIntensity
-                                                         : it->input.noiseIntensity;
+double MixerService::ChannelNoiseIntensity(const QString &, const QString &) const {
+    return 1.0;
 }
 
-void MixerService::SetChannelNoiseIntensity(const QString &channelId,
-                                            const QString &stage, double value) {
-    if (!graph_) return;
-    const double v = qBound(0.0, value, 1.0);
-    if (channelId == QLatin1String("mic")) {
-        Profile &p = config_.live();
-        if (parseFxStage(stage) == waveline::FxStage::Output) {
-            if (qFuzzyCompare(p.masterOutput.noiseIntensity, v)) return;
-            p.masterOutput.noiseIntensity = v;
-            applyMasterOutputFx();
-        } else {
-            if (qFuzzyCompare(p.noiseIntensity, v)) return;
-            p.noiseIntensity = v;
-            applyMicFx();
-        }
-    } else {
-        Profile &p = config_.live();
-        auto it = p.channelEffects.find(channelId);
-        if (it == p.channelEffects.end())
-            it = p.channelEffects.insert(channelId, ChannelEffectsState{});
-        (parseFxStage(stage) == waveline::FxStage::Output ? it->output : it->input)
-            .noiseIntensity = v;
-        applyChannelFx(channelId);
-    }
-    scheduleSave();
-}
+void MixerService::SetChannelNoiseIntensity(const QString &, const QString &, double) {}
 
 double MixerService::ChannelMicSend(const QString &channelId) const {
     if (!graph_) return 0.0;
@@ -6016,26 +5966,9 @@ void MixerService::SetMasterNoiseSuppression(const QString &masterId, bool on) {
     emit Changed();
 }
 
-double MixerService::MasterNoiseIntensity(const QString &masterId) const {
-    if (masterId == QLatin1String("mic")) return NoiseIntensity();
-    const MasterBusState *m = masterBusState(config_.live(), masterId);
-    return m ? m->noiseIntensity : 1.0;
-}
+double MixerService::MasterNoiseIntensity(const QString &) const { return 1.0; }
 
-void MixerService::SetMasterNoiseIntensity(const QString &masterId, double value) {
-    if (masterId == QLatin1String("mic")) {
-        SetNoiseIntensity(value);
-        return;
-    }
-    MasterBusState *m = masterBusState(config_.live(), masterId);
-    if (!m) return;
-    const double v = qBound(0.0, value, 1.0);
-    if (qFuzzyCompare(m->noiseIntensity, v)) return;
-    m->noiseIntensity = v;
-    applyMasterFx(masterId);
-    scheduleSave();
-    emit Changed();
-}
+void MixerService::SetMasterNoiseIntensity(const QString &, double) {}
 
 bool MixerService::MasterSoftwareMonitor(const QString &masterId) const {
     if (masterId == QLatin1String("mic")) return SoftwareMonitor();

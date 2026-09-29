@@ -23,11 +23,6 @@
 namespace waveline {
 namespace {
 
-// One-pole step per sample for the wet/dry mix: about 30 ms to travel, which
-// is slow enough to be silent and fast enough that releasing the slider feels
-// immediate. 1 - exp(-1/(0.03 * 48000)).
-constexpr float kWetGlide = 0.000694f;
-
 // Both engines are trained for 48 kHz and this is not configurable.
 constexpr uint32_t kRate = 48000;
 
@@ -49,7 +44,6 @@ struct NoiseFilter::Impl {
         std::unique_ptr<Denoiser> denoiser;
         FrameAdapter adapter;
         bool resetPending = true;
-        float wetMix = 1.0f;
     };
     std::array<Channel, 2> channel;
     int channels = 1;
@@ -64,7 +58,6 @@ struct NoiseFilter::Impl {
 
 
     std::atomic<bool> enabled{true};
-    std::atomic<float> intensity{1.0f};
     std::atomic<float> speechProb{0.0f};
     std::atomic<float> inRms{0.0f};
     std::atomic<float> outRms{0.0f};
@@ -78,7 +71,6 @@ void onProcess(void *userdata, spa_io_position *position) {
     const uint32_t n = position->clock.duration;
     std::unique_lock<std::mutex> lk(d->engineLock, std::try_to_lock);
     const bool process = lk.owns_lock() && d->enabled.load(std::memory_order_relaxed);
-    const float wetTarget = d->intensity.load(std::memory_order_relaxed);
     double inputEnergy = 0, outputEnergy = 0;
     float speech = 0;
     for (int ch = 0; ch < d->channels; ++ch) {
@@ -99,10 +91,6 @@ void onProcess(void *userdata, spa_io_position *position) {
             if (c.resetPending) { c.adapter.reset(); c.resetPending = false; }
             c.adapter.process(in, out, n, [&](const float *frameIn, float *frameOut) {
                 speech = std::max(speech, c.denoiser->processFrame(frameIn, frameOut));
-                for (int i = 0; i < d->frame; ++i) {
-                    c.wetMix += (wetTarget - c.wetMix) * kWetGlide;
-                    frameOut[i] = frameOut[i] * c.wetMix + frameIn[i] * (1.0f - c.wetMix);
-                }
             });
         }
         for (uint32_t i = 0; i < n; ++i) outputEnergy += double(out[i]) * out[i];
@@ -179,13 +167,6 @@ void NoiseFilter::setEnabled(bool on) {
 }
 bool NoiseFilter::enabled() const {
     return d_->enabled.load(std::memory_order_relaxed);
-}
-void NoiseFilter::setIntensity(float intensity) {
-    d_->intensity.store(intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity),
-                        std::memory_order_relaxed);
-}
-float NoiseFilter::intensity() const {
-    return d_->intensity.load(std::memory_order_relaxed);
 }
 
 float NoiseFilter::speechProbability() const {

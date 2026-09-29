@@ -41,8 +41,6 @@ struct EqAdvancedControls {
 
 struct FxStageControls {
     ToggleSwitch *noise = nullptr;
-    QSlider *intensity = nullptr;
-    QLabel *intensityLabel = nullptr;
     ToggleSwitch *lowCut = nullptr;
     QComboBox *lowCutHz = nullptr;
     ToggleSwitch *eq = nullptr;
@@ -182,8 +180,6 @@ private:
     QLabel *firmwareLabel_ = nullptr;
     QWidget *firmwareRow_ = nullptr;
     ToggleSwitch *noise_ = nullptr;
-    QSlider *intensity_ = nullptr;
-    QLabel *intensityLabel_ = nullptr;
     LevelMeter *noiseIn_ = nullptr;
     LevelMeter *noiseOut_ = nullptr;
     ToggleSwitch *micStereo_ = nullptr;
