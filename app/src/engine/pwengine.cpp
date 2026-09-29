@@ -10,11 +10,14 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/impl.h>
 #include <pipewire/client.h>
+#include <pipewire/device.h>
 #include <pipewire/node.h>
 #include <pipewire/extensions/metadata.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/profile.h>
 #include <spa/param/props.h>
 #include <spa/pod/builder.h>
+#include <spa/pod/parser.h>
 #include <spa/utils/json.h>
 
 #include <algorithm>
@@ -148,6 +151,10 @@ struct PwEngine::Impl {
     // Client globals carry process metadata for their stream nodes; bind so we
     // see the full property set, not just the sparse registry announce.
     std::map<uint32_t, pw_proxy *> clientProxies;
+    // ALSA cards, bound so their active profile can be read and changed. See
+    // PwEngine::setDeviceProfile(). deviceProfiles is under nodesMutex.
+    std::map<uint32_t, pw_proxy *> deviceProxies;
+    std::map<uint32_t, int> deviceProfiles;
     pw_metadata *metadata = nullptr;
     spa_hook metadataListener{};
     // Registry ids of the session manager's two metadata objects, so their
@@ -352,6 +359,8 @@ void applyNodeProps(PwNode &n, const spa_dict *props) {
         n.hidesLatency = isTruthyProp(v);
     if ((v = spa_dict_lookup(props, "api.alsa.headroom")))
         n.alsaHeadroom = static_cast<int>(std::strtol(v, nullptr, 10));
+    if ((v = spa_dict_lookup(props, PW_KEY_DEVICE_ID)))
+        n.deviceId = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
 }
 
 void resolveClientProcess(PwNode &n, const PwEngine::Impl &impl) {
@@ -590,6 +599,57 @@ void bindStreamWatch(PwEngine::Impl *impl, uint32_t id, const PwNode &n) {
     impl->streamProxies[id] = proxy;
 }
 
+struct DeviceWatch {
+    PwEngine::Impl *impl = nullptr;
+    spa_hook listener{};
+    uint32_t id = 0;
+};
+
+void onDeviceParam(void *data, int /*seq*/, uint32_t paramId, uint32_t /*index*/,
+                   uint32_t /*next*/, const spa_pod *param) {
+    auto *watch = static_cast<DeviceWatch *>(data);
+    if (paramId != SPA_PARAM_Profile || !param) return;
+    int32_t index = -1;
+    if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamProfile, nullptr,
+                             SPA_PARAM_PROFILE_index, SPA_POD_Int(&index)) < 0)
+        return;
+    std::lock_guard<std::mutex> lock(watch->impl->nodesMutex);
+    watch->impl->deviceProfiles[watch->id] = index;
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+const pw_device_events kDeviceEvents = {
+    .version = PW_VERSION_DEVICE_EVENTS,
+    .param = onDeviceParam,
+};
+#pragma GCC diagnostic pop
+
+// ALSA cards only: those are the ones with ACP profiles, and the only ones a
+// profile cycle can reopen.
+void bindAlsaDevice(PwEngine::Impl *impl, uint32_t id, const spa_dict *props) {
+    if (!props || impl->deviceProxies.count(id)) return;
+    const char *api = spa_dict_lookup(props, PW_KEY_DEVICE_API);
+    const char *cls = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+    if (!api || std::strcmp(api, "alsa") != 0 || !cls ||
+        std::strcmp(cls, "Audio/Device") != 0)
+        return;
+
+    auto *proxy = static_cast<pw_proxy *>(pw_registry_bind(
+        impl->registry, id, PW_TYPE_INTERFACE_Device, PW_VERSION_DEVICE,
+        sizeof(DeviceWatch)));
+    if (!proxy) return;
+
+    auto *watch = static_cast<DeviceWatch *>(pw_proxy_get_user_data(proxy));
+    watch->impl = impl;
+    watch->id = id;
+    auto *device = reinterpret_cast<pw_device *>(proxy);
+    pw_device_add_listener(device, &watch->listener, &kDeviceEvents, watch);
+    uint32_t ids[] = {SPA_PARAM_Profile};
+    pw_device_subscribe_params(device, ids, 1);
+    impl->deviceProxies[id] = proxy;
+}
+
 void onRegistryGlobal(void *data, uint32_t id, uint32_t /*permissions*/,
                       const char *type, uint32_t /*version*/,
                       const spa_dict *props) {
@@ -666,6 +726,11 @@ void onRegistryGlobal(void *data, uint32_t id, uint32_t /*permissions*/,
         return;
     }
 
+    if (type && std::strcmp(type, PW_TYPE_INTERFACE_Device) == 0) {
+        bindAlsaDevice(impl, id, props);
+        return;
+    }
+
     if (!type || std::strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
 
     PwNode n;
@@ -726,6 +791,12 @@ void onRegistryGlobalRemove(void *data, uint32_t id) {
     if (auto it = impl->clientProxies.find(id); it != impl->clientProxies.end()) {
         pw_proxy_destroy(it->second);
         impl->clientProxies.erase(it);
+    }
+    if (auto it = impl->deviceProxies.find(id); it != impl->deviceProxies.end()) {
+        pw_proxy_destroy(it->second);
+        impl->deviceProxies.erase(it);
+        std::lock_guard<std::mutex> lock(impl->nodesMutex);
+        impl->deviceProfiles.erase(id);
     }
     PwNode removed;
     bool erased;
@@ -913,6 +984,8 @@ void PwEngine::stop() {
         d_->streamProxies.clear();
         for (auto &[_, p] : d_->clientProxies) pw_proxy_destroy(p);
         d_->clientProxies.clear();
+        for (auto &[_, p] : d_->deviceProxies) pw_proxy_destroy(p);
+        d_->deviceProxies.clear();
         for (auto *p : d_->sinkProxies) pw_proxy_destroy(p);
         d_->sinkProxies.clear();
         if (d_->registry) pw_proxy_destroy(reinterpret_cast<pw_proxy *>(d_->registry));
@@ -1805,6 +1878,33 @@ std::vector<PwNode> PwEngine::nodes() const {
         out.push_back(std::move(copy));
     }
     return out;
+}
+
+int PwEngine::deviceProfile(uint32_t deviceId) const {
+    std::lock_guard<std::mutex> lock(d_->nodesMutex);
+    const auto it = d_->deviceProfiles.find(deviceId);
+    return it == d_->deviceProfiles.end() ? -1 : it->second;
+}
+
+bool PwEngine::setDeviceProfile(uint32_t deviceId, int index, std::string &error) {
+    pw_thread_loop_lock(d_->loop);
+    const auto it = d_->deviceProxies.find(deviceId);
+    if (it == d_->deviceProxies.end()) {
+        pw_thread_loop_unlock(d_->loop);
+        error = "no ALSA card with device id " + std::to_string(deviceId);
+        return false;
+    }
+    uint8_t buffer[256];
+    spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    const spa_pod *pod = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+        &b, SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+        SPA_PARAM_PROFILE_index, SPA_POD_Int(index),
+        SPA_PARAM_PROFILE_save, SPA_POD_Bool(false)));
+    pw_device_set_param(reinterpret_cast<pw_device *>(it->second),
+                        SPA_PARAM_Profile, 0, pod);
+    pw_core_sync(d_->core, PW_ID_CORE, 0);
+    pw_thread_loop_unlock(d_->loop);
+    return true;
 }
 
 PwEngine::GraphClock PwEngine::graphClock() const {

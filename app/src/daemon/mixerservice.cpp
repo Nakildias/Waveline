@@ -24,6 +24,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMap>
 #include <QMetaObject>
 #include <QPointer>
 #include <QProcess>
@@ -1503,6 +1504,66 @@ bool MixerService::scheduleCaptureSettle(const QStringList &masterIds) {
     return true;
 }
 
+bool MixerService::reopenCaptureCards(const QStringList &masterIds) {
+    if (!graph_) return false;
+    QStringList ids = masterIds;
+    if (ids.isEmpty()) {
+        for (const auto &bus : graph_->masterBuses())
+            if (bus.busType != "midi") ids.append(QString::fromStdString(bus.id));
+    }
+
+    const std::vector<waveline::PwNode> nodes = engine_.nodes();
+    QMap<uint32_t, int> cards;  // device id -> profile to restore
+    QStringList fallback;
+    for (const QString &id : ids) {
+        const QString match = masterCaptureIdentity(id);
+        if (match.isEmpty()) continue;
+        const std::string node = graph_->findCaptureNode(match.toStdString());
+        if (node.empty()) continue;
+        uint32_t deviceId = 0;
+        for (const auto &n : nodes) {
+            if (n.name == node) {
+                deviceId = n.deviceId;
+                break;
+            }
+        }
+        // Profile 0 is "off"; a card already there has nothing to reopen.
+        const int profile = deviceId ? engine_.deviceProfile(deviceId) : -1;
+        if (profile > 0) cards.insert(deviceId, profile);
+        else fallback << id;
+    }
+
+    for (auto it = cards.cbegin(); it != cards.cend(); ++it) {
+        const uint32_t deviceId = it.key();
+        const int profile = it.value();
+        std::string err;
+        if (!engine_.setDeviceProfile(deviceId, 0, err)) {
+            qWarning("waveline: could not close card %u: %s", deviceId, err.c_str());
+            // Its masters get the plain rebuild instead.
+            for (const QString &id : ids) {
+                const std::string node = graph_->findCaptureNode(
+                    masterCaptureIdentity(id).toStdString());
+                for (const auto &n : nodes)
+                    if (n.name == node && n.deviceId == deviceId) fallback << id;
+            }
+            continue;
+        }
+        qInfo("waveline: reopening card %u (profile %d)", deviceId, profile);
+        // Long enough for every PCM on the card to actually close; the nodes
+        // returning are what trigger the capture rebuild.
+        QTimer::singleShot(1000, this, [this, deviceId, profile] {
+            std::string err;
+            if (!engine_.setDeviceProfile(deviceId, profile, err))
+                qWarning("waveline: could not reopen card %u: %s", deviceId,
+                         err.c_str());
+        });
+    }
+
+    fallback.removeDuplicates();
+    const bool settled = !fallback.isEmpty() && scheduleCaptureSettle(fallback);
+    return !cards.isEmpty() || settled;
+}
+
 QStringList MixerService::mastersForCaptureNode(const QString &nodeName) const {
     QStringList out;
     if (nodeName.isEmpty()) return out;
@@ -2708,10 +2769,15 @@ void MixerService::handleHardwareNodeGone(const waveline::PwNode &n) {
 // the clock. That button and this are the same operation, and the journal of
 // any machine that suspends shows it being pressed by hand after every wake.
 //
-// So do it automatically. scheduleCaptureSettle({}) with no ids means every
-// master, and it is the same quiet-then-rebuild used for cold start, hotplug
-// and a forced quantum change: audio is held silent while the hardware edge
-// settles, then each capture hop is recreated once, cleanly.
+// So do it automatically -- and reopen the card, not only our side of it.
+// Rebuilding the capture hops alone was not enough: when the kernel fails to
+// resume a PCM (seen after an aborted S3, "snd_pcm_start: File descriptor in
+// bad state"), it stays SUSPENDED with PipeWire still holding it open. The
+// node reports running and hands back one stale buffer forever -- the loop --
+// and every rebuild reconnected to that same dead PCM. Only a replug fixed it.
+// reopenCaptureCards() is that replug in software: each card goes to "off"
+// and back, its nodes leave and return, and the hotplug path does the settled
+// rebuild on a freshly opened device.
 //
 // Nothing is done on the way *down*. The machine is about to stop executing;
 // anything scheduled here either does not run or runs into a suspending
@@ -2727,15 +2793,15 @@ void MixerService::onPrepareForSleep(bool goingToSleep) {
     // at all. The second attempt covers a slow enumeration, and the shared
     // flag keeps a successful first one from being torn down and redone.
     //
-    // scheduleCaptureSettle() returns false when there is nothing to settle --
+    // reopenCaptureCards() returns false when there is nothing to reopen --
     // no graph, or no master bus yet -- which is what makes the retry
     // meaningful rather than a duplicate.
     auto settled = std::make_shared<bool>(false);
     for (int ms : {2500, 6000}) {
         QTimer::singleShot(ms, this, [this, ms, settled] {
             if (*settled) return;
-            if (!(*settled = scheduleCaptureSettle({}))) return;
-            qInfo("waveline: resumed from sleep -- settling every capture "
+            if (!(*settled = reopenCaptureCards({}))) return;
+            qInfo("waveline: resumed from sleep -- reopening every capture "
                   "device (%dms after wake)", ms);
         });
     }
@@ -5454,8 +5520,10 @@ bool MixerService::RebuildMasterCapture(const QString &id) {
     // can attach while PipeWire is still changing the graph's rate/quantum,
     // leaving the capture resampler in a permanent resync loop. The same
     // two-phase quiet/rebuild used for hotplug gives every microphone a clean
-    // clock negotiation before audio is admitted to the DSP graph.
-    scheduleCaptureSettle({id});
+    // clock negotiation before audio is admitted to the DSP graph. The card is
+    // reopened first, so a PCM the kernel left stuck is recovered too -- see
+    // onPrepareForSleep().
+    reopenCaptureCards({id});
     qInfo("waveline: scheduled settled capture rebuild for master '%s' (manual)",
           qUtf8Printable(id));
     emit Changed();
