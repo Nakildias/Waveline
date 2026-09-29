@@ -2197,11 +2197,8 @@ void MixerGraph::rewireDuckingSidechainsForMic(const std::string &micChannelId) 
 }
 
 void MixerGraph::setChannelNoiseSuppression(const std::string &channelId, FxStage stage,
-                                            bool on, float intensity) {
-    if (auto *nc = channelNoiseFilter(channelId, stage)) {
-        nc->setEnabled(on);
-        nc->setIntensity(intensity);
-    }
+                                            bool on) {
+    if (auto *nc = channelNoiseFilter(channelId, stage)) nc->setEnabled(on);
 }
 
 bool MixerGraph::ensureChannelNoiseFilter(const std::string &channelId, FxStage stage) {

@@ -229,7 +229,7 @@ cannot end up with no USB audio driver at all.
 ### Processing
 
 - **Noise suppression** — DeepFilterNet (default when available) or RNNoise,
-  switchable at runtime, with a strength control.
+  switchable at runtime. On or off, always at full strength.
 - **Per-channel and per-device effects**: low-cut filter, EQ, de-esser. The EQ
   has two modes — three tone sliders, or an Advanced panel with ten fully
   parametric bands on a draggable response curve, with presets.

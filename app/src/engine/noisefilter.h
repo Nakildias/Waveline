@@ -75,15 +75,11 @@ public:
     void setEnabled(bool on);
     bool enabled() const;
 
-    // 0.0 .. 1.0. Neither engine has a natural strength control -- RNNoise
-    // either denoises a frame or it does not -- so this blends the denoised
-    // signal back with the original: 1.0 is the full effect, 0.5 keeps half the
-    // original room tone, 0.0 is untouched. Partial settings sound
-    // considerably more natural than full suppression, which can make speech
-    // pump and sound gated. Applied identically for both engines, so the
-    // slider means the same thing whichever is selected.
-    void setIntensity(float intensity);
-    float intensity() const;
+    // On or off, and nothing in between. There used to be a strength that
+    // blended the denoised signal back with the original, but the denoised
+    // signal comes out a frame or more behind its input -- more for
+    // DeepFilterNet, which also looks ahead -- so every setting short of full
+    // mixed two copies of the voice a few milliseconds apart and doubled it.
 
     // Swaps the model without disturbing the node, its ports or its links.
     // The new back end is built on the calling thread and published

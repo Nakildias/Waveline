@@ -169,11 +169,8 @@ int main() {
             }
         };
         check(0); check(1); check(2);
-        // Enabled denoising with a fully dry mix still exercises separate model
-        // histories/frame adapters; bypass must preserve both channels too.
-        graph.setChannelNoiseSuppression("system", FxStage::Output, true, 0.0f);
-        check(0); check(1); check(2);
-        graph.setChannelNoiseSuppression("system", FxStage::Output, false, 1.0f);
+        // Bypassed denoising must preserve both channels.
+        graph.setChannelNoiseSuppression("system", FxStage::Output, false);
         graph.setChannelMonitorFx("system", false);
         require(graph.rewireChannelMonitor("system", error), error);
         check(0); check(1);

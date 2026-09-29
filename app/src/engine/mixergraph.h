@@ -260,7 +260,7 @@ public:
                               const CreativeFxSettings &settings);
     bool setMasterCreativeFx(const std::string &id, const CreativeFxSettings &settings);
     void setChannelNoiseSuppression(const std::string &channelId, FxStage stage,
-                                    bool on, float intensity = 1.0f);
+                                    bool on);
     // Returns true only when a new NC filter node was created (needs rewire).
     bool ensureChannelNoiseFilter(const std::string &channelId, FxStage stage);
     // Gain of this channel's own published microphone, 0..1+. Named "micSend"
