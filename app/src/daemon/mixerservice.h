@@ -1084,6 +1084,12 @@ private:
     // to rebuild. Callers that must not lose the rebuild (the startup quantum
     // assert) retry on that; everyone else ignores it.
     bool scheduleCaptureSettle(const QStringList &masterIds = {});
+    // Closes and reopens the ALSA card behind each master by switching its
+    // profile to "off" and back -- a replug done in software. The masters'
+    // nodes leave and return, so recovery runs through the hotplug path.
+    // Masters with no ALSA card to cycle get scheduleCaptureSettle() instead.
+    // Empty ids = every master. False when there was nothing to do.
+    bool reopenCaptureCards(const QStringList &masterIds = {});
     // Capture devices that wireMicPaths() skipped as absent but that are in the
     // registry by the time the rewire finishes. Run once on a successful
     // rewire, just as hotplug is armed.

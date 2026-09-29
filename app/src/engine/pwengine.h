@@ -78,6 +78,10 @@ struct PwNode {
     // WirePlumber, and "did that actually take" is otherwise unanswerable from
     // inside the mixer. See MixerService::EffectiveOutputHeadroom().
     int alsaHeadroom = -1;
+    // device.id: the Device object (the sound card) this node belongs to, or 0
+    // for anything that is not hardware. What PwEngine::setDeviceProfile()
+    // takes, and present in the registry announce itself.
+    uint32_t deviceId = 0;
 };
 
 class PwEngine {
@@ -281,6 +285,21 @@ public:
     std::string defaultSourceName() const;
 
     std::vector<PwNode> nodes() const;
+
+    // ---- card profiles ----------------------------------------------------
+    //
+    // The active profile of an ALSA card (a PipeWire Device), by index, or -1
+    // when the card is unknown or has not reported one yet. Tracked for every
+    // ALSA card from its Profile param, so it is the live value rather than
+    // whatever was stored.
+    int deviceProfile(uint32_t deviceId) const;
+
+    // Switches a card to profile `index`. Index 0 is ACP's "off", which closes
+    // every PCM on the card and removes its nodes; switching back reopens them
+    // from scratch -- the software equivalent of unplugging the card. Written
+    // with save=false so the session manager never stores a transient "off"
+    // as the user's choice.
+    bool setDeviceProfile(uint32_t deviceId, int index, std::string &error);
 
     // ---- the graph clock ---------------------------------------------------
     //
