@@ -2096,7 +2096,8 @@ void MixerService::rewireGraph() {
     QTimer::singleShot(2500, this, [this] { syncMasterMeters(); });
     // Every rewire follows a device arriving or leaving, which is exactly when
     // there is a new name to remember.
-    rememberMasterDeviceLabels();
+    const bool renamed = refreshAutoMasterNames();
+    if (rememberMasterDeviceLabels() || renamed) emit Changed();
 }
 
 void MixerService::captureToProfile() { config_.live() = snapshot(); }
@@ -4404,15 +4405,25 @@ QString MixerService::masterDeviceLabel(const MasterBusState &m,
                                         bool *connected) const {
     const bool midi = m.busType == QLatin1String("midi");
     const QString match = midi ? m.midiPortMatch : m.captureMatch;
+    const QStringList &rows = midi ? midis : captures;
+    auto describe = [&rows](const QString &node) -> QString {
+        for (const QString &row : rows) {
+            const int tab = row.indexOf(QLatin1Char('\t'));
+            if (tab > 0 && row.left(tab) == node) return row.mid(tab + 1);
+        }
+        return {};
+    };
     // A bus with nothing pinned follows whatever is default, so there is no
-    // device for it to be missing.
+    // device for it to be missing. It still has a device, though: the one it is
+    // capturing from right now. Returning nothing here is what put "unknown"
+    // on the HW tab of a Wave:3 that was working fine.
     if (connected) *connected = true;
-    if (match.isEmpty()) return {};
-
-    for (const QString &row : midi ? midis : captures) {
-        const int tab = row.indexOf(QLatin1Char('\t'));
-        if (tab > 0 && row.left(tab) == match) return row.mid(tab + 1);
+    if (match.isEmpty()) {
+        const QString node = masterCaptureIdentity(m.id);
+        return node.isEmpty() ? QString() : describe(node);
     }
+
+    if (const QString label = describe(match); !label.isEmpty()) return label;
     if (connected) *connected = false;
 
     // Unplugged: what it called itself the last time it was here. Kept in the
@@ -4433,6 +4444,36 @@ QString MixerService::masterDeviceLabel(const MasterBusState &m,
     const QString brand =
         QString::fromStdString(waveline::masterCaptureBrand(match.toStdString()));
     return brand == QLatin1String("Waveline") ? match : brand;
+}
+
+// The node a bus's label describes: its pinned device, or for one following
+// the default, whichever device that resolves to now.
+QString MixerService::masterLabelNode(const MasterBusState &m) const {
+    if (m.busType == QLatin1String("midi") || !m.captureMatch.isEmpty())
+        return m.captureMatch;
+    return masterCaptureIdentity(m.id);
+}
+
+// Auto names are worked out from the device a bus captures from. One following
+// the default can start with no device at all -- a Wave:3 is held back for 15 s
+// at boot, so the daemon comes up before it exists -- and gets a generic name.
+// Nothing re-derived it when the microphone then arrived, so it stayed
+// "Input #1" for the whole session.
+bool MixerService::refreshAutoMasterNames() {
+    if (!graph_) return false;
+    Profile &p = config_.live();
+    QStringList before;
+    for (const MasterBusState &m : p.masterBuses) before << m.name;
+    assignMasterNames(p, profile_, graph_.get());
+    bool changed = false;
+    for (int i = 0; i < p.masterBuses.size(); ++i) {
+        const MasterBusState &m = p.masterBuses[i];
+        if (m.name == before.value(i)) continue;
+        graph_->setMasterName(m.id.toStdString(), m.name.toStdString());
+        changed = true;
+    }
+    if (changed) scheduleSave();
+    return changed;
 }
 
 bool MixerService::rememberMasterDeviceLabels() {
@@ -4530,7 +4571,7 @@ QStringList MixerService::MasterBuses() const {
         bool connected = true;
         // The desktop's name for the pinned capture device, when it has one.
         const QString label = waveline::DesktopNames::instance().apply(
-            m.captureMatch, masterDeviceLabel(m, captures, midis, &connected));
+            masterLabelNode(m), masterDeviceLabel(m, captures, midis, &connected));
         // MIDI carries no audio and so no capture buffering; -1 is "nothing to
         // report", which the UI shows as no latency line at all.
         const bool midi = m.busType == QLatin1String("midi");
@@ -5144,7 +5185,7 @@ QStringList MixerService::ShellInputs() const {
 
         bool connected = true;
         const QString label = waveline::DesktopNames::instance().apply(
-            m.captureMatch, masterDeviceLabel(m, captures, midis, &connected));
+            masterLabelNode(m), masterDeviceLabel(m, captures, midis, &connected));
         out << QStringLiteral("%1\t%2\t%3\t%4\t%5\t%6\t%7\t%8\t%9\t%10")
                    .arg(m.id, m.name, label)
                    .arg(connected ? 1 : 0)

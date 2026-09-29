@@ -3,7 +3,6 @@
 
 #include <QApplication>
 #include <QIcon>
-#include <QProcess>
 #include <QTimer>
 
 #include <cstdio>
@@ -50,8 +49,9 @@ int main(int argc, char **argv) {
     // QT_QPA_PLATFORM=offscreen, so the layout can be checked without a
     // desktop session, and it is how the README image is produced.
     QString shot;
-    bool shootTuner = false;
+    QString shootWindow;
     int scroll = 0;
+    int shotAfterMs = 700;
     int width = 0, height = 0;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == QLatin1String("--screenshot") && i + 1 < args.size())
@@ -59,8 +59,19 @@ int main(int argc, char **argv) {
         // The tuner is a window of its own, so it needs its own grab.
         else if (args[i] == QLatin1String("--screenshot-tuner") && i + 1 < args.size()) {
             shot = args[i + 1];
-            shootTuner = true;
+            shootWindow = QStringLiteral("tuner");
         }
+        // --screenshot-window <name> <file>: one of the other windows instead
+        // of the main one -- see MainWindow::openWindowForScreenshot().
+        else if (args[i] == QLatin1String("--screenshot-window") && i + 2 < args.size()) {
+            shootWindow = args[i + 1];
+            shot = args[i + 2];
+        }
+        // How long to wait before the shot. Long enough to change the desktop's
+        // scheme underneath it, which is how the in-place restyle is checked:
+        // a switched window must match one started in the new scheme.
+        else if (args[i] == QLatin1String("--screenshot-after") && i + 1 < args.size())
+            shotAfterMs = args[i + 1].toInt();
         else if (args[i] == QLatin1String("--scroll") && i + 1 < args.size())
             scroll = args[i + 1].toInt();
         else if (args[i] == QLatin1String("--size") && i + 2 < args.size()) {
@@ -69,35 +80,24 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Monarchy switching between light and dark while the mixer is open: the
-    // window reopens itself in the new scheme. Restyling in place leaves
-    // everything that copied a colour when it was built -- cards, icons,
-    // strips -- in the old one, which on a light window is a grey smear.
-    // Nothing is lost by it: the mixer's state is the daemon's, and the
-    // window's own (panels, card order) is saved as it changes.
-    if (Monarchy::isActive() && shot.isEmpty()) {
-        const bool startedLight = Monarchy::isLight();
-        QObject::connect(&Monarchy::Settings::instance(), &Monarchy::Settings::changed,
-                         &app, [startedLight] {
-            if (Monarchy::isLight() == startedLight) return;
-            QProcess::startDetached(QCoreApplication::applicationFilePath(),
-                                    QCoreApplication::arguments().mid(1));
-            QCoreApplication::quit();
-        });
-    }
-
     MainWindow w;
     if (width > 0 && height > 0) w.resize(width, height);
     if (scroll) w.scrollSidebar(scroll);
     w.show();
 
     QWidget *subject = &w;
-    if (shootTuner) subject = w.openTunerWindow();
+    if (!shootWindow.isEmpty()) {
+        subject = w.openWindowForScreenshot(shootWindow);
+        if (!subject) {
+            std::fprintf(stderr, "unknown window %s\n", qPrintable(shootWindow));
+            return 1;
+        }
+    }
 
     if (!shot.isEmpty()) {
         // One event-loop turn so the first poll lands and the widgets show
         // real values rather than their constructed defaults.
-        QTimer::singleShot(700, &w, [subject, shot] {
+        QTimer::singleShot(shotAfterMs, &w, [subject, shot] {
             const bool ok = subject->grab().save(shot);
             std::fprintf(ok ? stdout : stderr, "%s %s\n",
                          ok ? "wrote" : "failed to write", qPrintable(shot));

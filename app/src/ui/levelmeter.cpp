@@ -216,7 +216,7 @@ void LevelMeter::paintEvent(QPaintEvent *) {
         p.save();
         p.setClipPath(trough);
         if (tint_.isValid()) {
-            p.fillPath(clip, tint_);
+            p.fillPath(clip, tint_.get());
         } else {
             QLinearGradient g(orient_ == Qt::Horizontal ? r.topLeft()
                                                         : r.bottomLeft(),

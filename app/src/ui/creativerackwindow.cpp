@@ -243,9 +243,7 @@ RackModule::RackModule(int stageIndex, const QString &title, const QString &tip,
     gripLabel->setCursor(Qt::SizeAllCursor);
     gripLabel->setFixedSize(kSideColumnPx, kSideColumnPx);
     gripLabel->setAlignment(Qt::AlignCenter);
-    QPalette gp = gripLabel->palette();
-    gp.setColor(QPalette::WindowText, Theme::TextFaint);
-    gripLabel->setPalette(gp);
+    Theme::setTextColor(gripLabel, Theme::TextFaint);
     grid->addWidget(gripLabel, 0, 0, Qt::AlignCenter);
     grip_ = gripLabel;
 
@@ -259,7 +257,7 @@ RackModule::RackModule(int stageIndex, const QString &title, const QString &tip,
     grid->addWidget(titleLabel, 0, 1, Qt::AlignVCenter);
 
     auto *removeBtn = new QPushButton(card);
-    removeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("minus"), Theme::TextDim, 14)));
+    removeBtn->setIcon(Theme::icon(QStringLiteral("minus"), Theme::TextDim, 14));
     removeBtn->setToolTip(QObject::tr("Remove this effect from the rack."));
     removeBtn->setFixedSize(kSideColumnPx, kSideColumnPx);
     removeBtn->setCursor(Qt::PointingHandCursor);
@@ -308,9 +306,7 @@ RackModule::KnobUi RackModule::addKnob(const QString &label, int min, int max,
 
     auto *name = new QLabel(label, this);
     name->setAlignment(Qt::AlignCenter);
-    QPalette np = name->palette();
-    np.setColor(QPalette::WindowText, Theme::TextDim);
-    name->setPalette(np);
+    Theme::setTextColor(name, Theme::TextDim);
     col->addWidget(name);
 
     auto *knobRow = new QHBoxLayout;
@@ -943,7 +939,7 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
         titleLay->setSpacing(6);
 
         auto *closeBtn = new QPushButton(titleBar);
-        closeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("x"), Theme::Text, 14)));
+        closeBtn->setIcon(Theme::icon(QStringLiteral("x"), Theme::Text, 14));
         closeBtn->setToolTip(tr("Close"));
         closeBtn->setCursor(Qt::PointingHandCursor);
         closeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -951,7 +947,7 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
         titleLay->addWidget(closeBtn);
 
         auto *minimizeBtn = new QPushButton(titleBar);
-        minimizeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("minus"), Theme::Text, 14)));
+        minimizeBtn->setIcon(Theme::icon(QStringLiteral("minus"), Theme::Text, 14));
         minimizeBtn->setToolTip(tr("Minimize"));
         minimizeBtn->setCursor(Qt::PointingHandCursor);
         minimizeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -963,9 +959,7 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
         hf.setBold(true);
         hf.setPointSizeF(hf.pointSizeF() * 1.05);
         heading->setFont(hf);
-        QPalette hp = heading->palette();
-        hp.setColor(QPalette::WindowText, Theme::Text);
-        heading->setPalette(hp);
+        Theme::setTextColor(heading, Theme::Text);
         titleLay->addSpacing(4);
         titleLay->addWidget(heading);
         titleLay->addStretch(1);
@@ -980,7 +974,7 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
         for (auto [slot, glyph, tip] : {std::tuple{&presetsBtn_, "save", presetsTip},
                                         std::tuple{&addBtn_, "plus", addTip}}) {
             auto *b = new QPushButton(titleBar);
-            b->setIcon(QIcon(Theme::iconPixmap(QString::fromLatin1(glyph), Theme::Text, 14)));
+            b->setIcon(Theme::icon(QString::fromLatin1(glyph), Theme::Text, 14));
             b->setToolTip(tip);
             b->setCursor(Qt::PointingHandCursor);
             b->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -1029,6 +1023,7 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
     outer->setSizeConstraint(QLayout::SetFixedSize);
 
     connect(client_, &MixerClient::changed, this, &VirtualRackWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
 
     lastPresetDir_ = QDir::homePath();
     rebuildPresetsMenu();

@@ -210,9 +210,7 @@ ChannelStrip::ChannelStrip(const QString &id, const QString &name, QWidget *pare
     slotFont.setPointSizeF(slotFont.pointSizeF() * 0.9);
     slotFont.setBold(true);
     slotLabel_->setFont(slotFont);
-    QPalette slotPal = slotLabel_->palette();
-    slotPal.setColor(QPalette::WindowText, Theme::TextDim);
-    slotLabel_->setPalette(slotPal);
+    Theme::setTextColor(slotLabel_, Theme::TextDim);
     slotLabel_->setVisible(false);
     leftBoxLay->addWidget(slotLabel_);
     footerLeftSpacer_ = new QWidget(footerHost_);
@@ -582,14 +580,16 @@ void ChannelStrip::setIdentityBadge(const QString &iconName, const QColor &color
 // says only "something has focus", not which card you are renaming.
 void ChannelStrip::applyTitleEditAccent() {
     if (!titleEdit_) return;
-    const QColor accent = deviceConnected_ ? color_ : Theme::Inactive;
-    titleEdit_->setStyleSheet(
-        QStringLiteral("QLineEdit { background: %1; border: 1px solid %2; "
-                       "border-radius: 6px; padding: 2px 6px; "
-                       "selection-background-color: %3; }"
-                       "QLineEdit:focus { border-color: %4; }")
-            .arg(Theme::css(Theme::Well), Theme::css(Theme::Line),
-                 accentTint(accent, 90).name(QColor::HexArgb), accent.name()));
+    Theme::follow(titleEdit_, [this] {
+        const QColor accent = deviceConnected_ ? color_ : Theme::Inactive;
+        titleEdit_->setStyleSheet(
+            QStringLiteral("QLineEdit { background: %1; border: 1px solid %2; "
+                           "border-radius: 6px; padding: 2px 6px; "
+                           "selection-background-color: %3; }"
+                           "QLineEdit:focus { border-color: %4; }")
+                .arg(Theme::css(Theme::Well), Theme::css(Theme::Line),
+                     accentTint(accent, 90).name(QColor::HexArgb), accent.name()));
+    }, "title-edit");
 }
 
 void ChannelStrip::applyAccentToToggles() {
@@ -613,9 +613,7 @@ void ChannelStrip::setDeviceConnected(bool on) {
     if (micSend_.fader) micSend_.fader->setAccent(shown);
     applyAccentToToggles();
     if (titleLabel_) {
-        QPalette pal = titleLabel_->palette();
-        pal.setColor(QPalette::WindowText, on ? Theme::Text : Theme::TextFaint);
-        titleLabel_->setPalette(pal);
+        Theme::setTextColor(titleLabel_, on ? Theme::Text : Theme::TextFaint);
     }
     // Tints only. The levels themselves are left alone: an unplugged
     // microphone reads silence on its own, and a bus that is still carrying
@@ -939,9 +937,7 @@ QWidget *ChannelStrip::buildColumn(const QString &mix, const QString &iconOn,
     QFont vf = out.value->font();
     vf.setPointSizeF(vf.pointSizeF() * 0.85);
     out.value->setFont(vf);
-    QPalette vp = out.value->palette();
-    vp.setColor(QPalette::WindowText, Theme::TextDim);
-    out.value->setPalette(vp);
+    Theme::setTextColor(out.value, Theme::TextDim);
     lay->addWidget(out.value);
 
     out.mute = new IconToggle(iconOn, iconOff, col);

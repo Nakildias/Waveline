@@ -22,9 +22,7 @@ namespace {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -109,9 +107,7 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
     errorLabel_ = new QLabel(statusCard);
     errorLabel_->setWordWrap(true);
     {
-        QPalette p = errorLabel_->palette();
-        p.setColor(QPalette::WindowText, Theme::Danger);
-        errorLabel_->setPalette(p);
+        Theme::setTextColor(errorLabel_, Theme::Danger);
     }
     errorLabel_->hide();
     statusLay->addWidget(errorLabel_);
@@ -186,15 +182,14 @@ CompanionWindow::CompanionWindow(MixerClient *client, QWidget *parent)
         body_);
     warning->setWordWrap(true);
     {
-        QPalette p = warning->palette();
-        p.setColor(QPalette::WindowText, Theme::Warn);
-        warning->setPalette(p);
+        Theme::setTextColor(warning, Theme::Warn);
     }
     outer->addWidget(warning);
 
     outer->addStretch();
 
     connect(client_, &MixerClient::changed, this, &CompanionWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     connect(client_, &MixerClient::availabilityChanged, this,
             &CompanionWindow::onAvailabilityChanged);
     onAvailabilityChanged(client_->available());

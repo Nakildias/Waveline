@@ -82,9 +82,7 @@ QString elideEnd(const QString &s, int maxChars = kOutputNameChars) {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -118,9 +116,7 @@ public:
         f.setPointSizeF(f.pointSizeF() * 0.72);
         f.setBold(true);
         setFont(f);
-        QPalette p = palette();
-        p.setColor(QPalette::WindowText, Theme::TextDim);
-        setPalette(p);
+        Theme::setTextColor(this, Theme::TextDim);
     }
 
     QSize sizeHint() const override { return captionSize(); }
@@ -167,16 +163,14 @@ public:
             0, Qt::AlignHCenter);
 
         auto *toInputDevices = new QLabel(this);
-        toInputDevices->setPixmap(
-            Theme::iconPixmap(QStringLiteral("arrow-left"), Theme::Text, 22));
+        Theme::setPixmap(toInputDevices, QStringLiteral("arrow-left"), Theme::Text, 22);
         toInputDevices->setAlignment(Qt::AlignCenter);
         col->addWidget(toInputDevices, 0, Qt::AlignHCenter);
 
         col->addStretch(1);
 
         auto *toChannels = new QLabel(this);
-        toChannels->setPixmap(
-            Theme::iconPixmap(QStringLiteral("arrow-right"), Theme::Text, 22));
+        Theme::setPixmap(toChannels, QStringLiteral("arrow-right"), Theme::Text, 22);
         toChannels->setAlignment(Qt::AlignCenter);
         col->addWidget(toChannels, 0, Qt::AlignHCenter);
 
@@ -482,9 +476,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     bannerLabel_->setWordWrap(true);
     bannerLabel_->setVisible(false);
     bannerLabel_->setContentsMargins(16, 10, 16, 10);
-    bannerLabel_->setStyleSheet(
-        QStringLiteral("QLabel { background: %1; color: %2; }")
-            .arg(Theme::DangerGround.name(), Theme::Text.name()));
+    Theme::follow(bannerLabel_, [this] {
+        bannerLabel_->setStyleSheet(
+            QStringLiteral("QLabel { background: %1; color: %2; }")
+                .arg(Theme::DangerGround.name(), Theme::Text.name()));
+    });
     outer->addWidget(bannerLabel_);
 
     // Amber, not the red above it: the daemon being gone means nothing works,
@@ -492,9 +488,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     // two into the same colour is how a warning stops being read.
     routingBanner_ = new QWidget(central);
     routingBanner_->setVisible(false);
-    routingBanner_->setStyleSheet(
-        QStringLiteral("QWidget { background: %1; }")
-            .arg(Theme::WarnGround.name()));
+    Theme::follow(routingBanner_, [this] {
+        routingBanner_->setStyleSheet(
+            QStringLiteral("QWidget { background: %1; }")
+                .arg(Theme::WarnGround.name()));
+    });
     routingBannerRows_ = new QVBoxLayout(routingBanner_);
     routingBannerRows_->setContentsMargins(16, 8, 16, 8);
     routingBannerRows_->setSpacing(6);
@@ -581,6 +579,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     onAvailabilityChanged(client_->available());
     onChanged();
     setUpdatesEnabled(true);
+    // After a scheme change, once more: the rows it rebuilds (combo entries,
+    // the routing banner) take their colours as they are built.
+    Theme::onChange(this, [this] { onChanged(); });
     resize(1431, 738);
     // Sized from what the Outputs row actually needs -- device picker, meter
     // and volume side by side -- rather than from a round number. Below this
@@ -857,7 +858,7 @@ QWidget *MainWindow::buildOutputs() {
     outputsGrid_->setVerticalSpacing(10);
 
     streamIcon_ = new QLabel(outputsCard_);
-    streamIcon_->setPixmap(Theme::iconPixmap(QStringLiteral("stream"), Theme::TextDim, 18));
+    Theme::setPixmap(streamIcon_, QStringLiteral("stream"), Theme::TextDim, 18);
 
     streamNameLabel_ = new QLabel(tr("Stream mix"), outputsCard_);
     QFont bold = streamNameLabel_->font();
@@ -984,17 +985,13 @@ void MainWindow::refreshMonitorOutputCombos() {
 
 void MainWindow::applyMonitorOutputRowConnected(MonitorOutputRowUi &row,
                                                 bool connected) {
-    const QColor iconColor = connected ? Theme::TextDim : Theme::TextFaint;
+    const QColor &iconColor = connected ? Theme::TextDim : Theme::TextFaint;
     if (row.icon) {
-        row.icon->setPixmap(
-            Theme::iconPixmap(QStringLiteral("headphones"), iconColor, 18));
+        Theme::setPixmap(row.icon, QStringLiteral("headphones"), iconColor, 18);
         row.icon->setEnabled(connected);
     }
     if (row.label) {
-        QPalette pal = row.label->palette();
-        pal.setColor(QPalette::WindowText,
-                     connected ? Theme::Text : Theme::TextFaint);
-        row.label->setPalette(pal);
+        Theme::setTextColor(row.label, connected ? Theme::Text : Theme::TextFaint);
     }
     // Combo stays usable so the user can pick a different device while waiting.
     if (row.mute) row.mute->setEnabled(connected);
@@ -1089,9 +1086,8 @@ void MainWindow::syncMonitorOutputUi() {
             i < states.size() ? states[i] : MonitorOutputInfo{};
         const bool connected = s.connected || s.sink.isEmpty();
         row.icon = new QLabel(outputsCard_);
-        row.icon->setPixmap(Theme::iconPixmap(
-            QStringLiteral("headphones"),
-            connected ? Theme::TextDim : Theme::TextFaint, 18));
+        Theme::setPixmap(row.icon, QStringLiteral("headphones"),
+                         connected ? Theme::TextDim : Theme::TextFaint, 18);
         outputsGrid_->addWidget(row.icon, i, 0);
 
         row.label = new QLabel(monitorOutputLabel(i, count), outputsCard_);
@@ -1498,9 +1494,7 @@ void MainWindow::refreshRoutingBanner() {
                          "Waveline has stopped trying, so this app will not be "
                          "on its channel.")
                           .arg(c.appName, c.channelId, c.sinkLabel));
-        QPalette tp = text->palette();
-        tp.setColor(QPalette::WindowText, Theme::Text);
-        text->setPalette(tp);
+        Theme::setTextColor(text, Theme::Text);
         lay->addWidget(text, 1);
 
         auto *dismiss = new QPushButton(tr("Don't warn me about %1").arg(c.sinkLabel), row);
@@ -1531,6 +1525,27 @@ void MainWindow::showLatencyDiagnostics() {
 QWidget *MainWindow::openTunerWindow() {
     showTuner();
     return tunerWindow_;
+}
+
+QWidget *MainWindow::openWindowForScreenshot(const QString &which) {
+    const QString mic = QStringLiteral("mic");
+    if (which == QLatin1String("tuner")) return openTunerWindow();
+    if (which == QLatin1String("soundboard")) { showSoundboard(); return soundboardWindow_; }
+    if (which == QLatin1String("companion")) { showCompanion(); return companionWindow_; }
+    if (which == QLatin1String("settings")) { showLatencyDiagnostics(); return settingsWindow_; }
+    if (which == QLatin1String("profiles")) { showProfiles(); return profilesWindow_; }
+    if (which == QLatin1String("about")) { showAbout(); return aboutWindow_; }
+    if (which == QLatin1String("effects")) { showGlobalEffects(mic); return globalEffects_.value(mic); }
+    if (which == QLatin1String("rack")) {
+        showVirtualRack(mic, tr("Microphone"));
+        return virtualRacks_.value(mic);
+    }
+    if (which == QLatin1String("channel-effects")) {
+        const QString voice = QStringLiteral("voice");
+        showChannelEffects(voice, tr("Voice"));
+        return channelEffects_.value(voice);
+    }
+    return nullptr;
 }
 
 void MainWindow::showCompanion() {

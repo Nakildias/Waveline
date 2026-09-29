@@ -630,9 +630,7 @@ namespace {
 
 QLabel *dimCaption(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette pal = l->palette();
-    pal.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(pal);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -700,14 +698,16 @@ ProEqWindow::ProEqWindow(MixerClient *client, const ProEqTarget &target,
         b->setMinimumWidth(34);
         b->setCursor(Qt::PointingHandCursor);
         const QColor c = bandColor(i);
-        b->setStyleSheet(
-            QStringLiteral("QPushButton { background: %1; color: %2; border: 1px solid %3;"
-                           "  border-radius: 4px; font-weight: bold; }"
-                           "QPushButton:hover { background: %4; }"
-                           "QPushButton:checked { background: %5; color: %6;"
-                           "  border: 1px solid %5; }")
-                .arg(Theme::css(Theme::Well), Theme::TextDim.name(), Theme::css(Theme::Line),
-                     Theme::css(Theme::CardHover), c.name(), Theme::glyphOn(c).name()));
+        Theme::follow(b, [b, c] {
+            b->setStyleSheet(
+                QStringLiteral("QPushButton { background: %1; color: %2; border: 1px solid %3;"
+                               "  border-radius: 4px; font-weight: bold; }"
+                               "QPushButton:hover { background: %4; }"
+                               "QPushButton:checked { background: %5; color: %6;"
+                               "  border: 1px solid %5; }")
+                    .arg(Theme::css(Theme::Well), Theme::TextDim.name(), Theme::css(Theme::Line),
+                         Theme::css(Theme::CardHover), c.name(), Theme::glyphOn(c).name()));
+        });
         bandButtons_[i] = b;
         picker->addWidget(b);
         connect(b, &QPushButton::clicked, this, [this, i] { selectBand(i); });
@@ -819,6 +819,7 @@ ProEqWindow::ProEqWindow(MixerClient *client, const ProEqTarget &target,
     connect(bandQ_, &QDoubleSpinBox::valueChanged, this, edited);
 
     connect(client_, &MixerClient::changed, this, &ProEqWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
 
     updating_ = true;
     curve_->setBands(bands_);

@@ -96,9 +96,7 @@ QPixmap tilePreview(const QColor &fill, const QString &icon, int px) {
 
 QLabel *caption(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette pal = l->palette();
-    pal.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(pal);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -173,6 +171,7 @@ CardIdentityDialog::CardIdentityDialog(const QString &title, const QString &name
     lay->addWidget(buttons);
 
     updatePreview();
+    Theme::onChange(this, [this] { updatePreview(); });
     name_->setFocus();
     name_->selectAll();
 }
@@ -242,7 +241,7 @@ void CardIdentityDialog::refreshIconGrid() {
         b->setAutoRaise(true);
         b->setCursor(Qt::PointingHandCursor);
         b->setToolTip(n);
-        b->setIcon(QIcon(Theme::iconPixmap(n, Theme::Text, 22)));
+        b->setIcon(Theme::icon(n, Theme::Text, 22));
         b->setIconSize(QSize(22, 22));
         connect(b, &QToolButton::clicked, this, [this, n] { setIcon(n); });
         grid->addWidget(b, i / kIconColumns, i % kIconColumns);

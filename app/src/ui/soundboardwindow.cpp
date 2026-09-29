@@ -60,9 +60,7 @@ constexpr int kSoundNameWidth = 190;
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -72,7 +70,7 @@ QHBoxLayout *captionRow(const QString &iconName, const QString &text, QWidget *p
     auto *row = new QHBoxLayout;
     row->setSpacing(6);
     auto *ic = new QLabel(parent);
-    ic->setPixmap(Theme::iconPixmap(iconName, Theme::TextFaint, 13));
+    Theme::setPixmap(ic, iconName, Theme::TextFaint, 13);
     row->addWidget(ic);
     row->addWidget(dimLabel(text, parent));
     row->addStretch();
@@ -158,7 +156,7 @@ QWidget *buildChromeTitleBar(QWidget *owner, const QString &heading,
     lay->setSpacing(6);
 
     auto *closeBtn = new QPushButton(bar);
-    closeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("x"), Theme::Text, 14)));
+    closeBtn->setIcon(Theme::icon(QStringLiteral("x"), Theme::Text, 14));
     closeBtn->setToolTip(QObject::tr("Close"));
     closeBtn->setCursor(Qt::PointingHandCursor);
     closeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -166,7 +164,7 @@ QWidget *buildChromeTitleBar(QWidget *owner, const QString &heading,
     lay->addWidget(closeBtn);
 
     auto *minimizeBtn = new QPushButton(bar);
-    minimizeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("minus"), Theme::Text, 14)));
+    minimizeBtn->setIcon(Theme::icon(QStringLiteral("minus"), Theme::Text, 14));
     minimizeBtn->setToolTip(QObject::tr("Minimize"));
     minimizeBtn->setCursor(Qt::PointingHandCursor);
     minimizeBtn->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -178,9 +176,7 @@ QWidget *buildChromeTitleBar(QWidget *owner, const QString &heading,
     hf.setBold(true);
     hf.setPointSizeF(hf.pointSizeF() * 1.05);
     headingLabel->setFont(hf);
-    QPalette hp = headingLabel->palette();
-    hp.setColor(QPalette::WindowText, Theme::Text);
-    headingLabel->setPalette(hp);
+    Theme::setTextColor(headingLabel, Theme::Text);
     lay->addSpacing(4);
     lay->addWidget(headingLabel);
 
@@ -669,9 +665,7 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     gripLabel->setCursor(Qt::SizeAllCursor);
     gripLabel->setFixedSize(16, 36);
     gripLabel->setAlignment(Qt::AlignCenter);
-    QPalette gp = gripLabel->palette();
-    gp.setColor(QPalette::WindowText, Theme::TextFaint);
-    gripLabel->setPalette(gp);
+    Theme::setTextColor(gripLabel, Theme::TextFaint);
     row->addWidget(gripLabel);
     grip_ = gripLabel;
 
@@ -698,9 +692,11 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     idFont.setBold(true);
     idFont.setLetterSpacing(QFont::AbsoluteSpacing, 0.4);
     idBadge_->setFont(idFont);
-    idBadge_->setStyleSheet(QStringLiteral(
-                                "background: %1; color: %2; border-radius: 4px; padding: 1px 6px;")
-                                .arg(Theme::css(Theme::Well), Theme::TextDim.name()));
+    Theme::follow(idBadge_, [this] {
+        idBadge_->setStyleSheet(
+            QStringLiteral("background: %1; color: %2; border-radius: 4px; padding: 1px 6px;")
+                .arg(Theme::css(Theme::Well), Theme::TextDim.name()));
+    });
     idBadge_->setToolTip(tr("Click to copy the wavelined-cli command that plays this sound\n"
                             "(for a Stream Deck button or a keybind)."));
     connect(idBadge_, &IdBadge::clicked, this, [this] {
@@ -714,9 +710,7 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     QFont durFont = durationLabel_->font();
     durFont.setPointSizeF(durFont.pointSizeF() * 0.88);
     durationLabel_->setFont(durFont);
-    QPalette dp = durationLabel_->palette();
-    dp.setColor(QPalette::WindowText, Theme::TextFaint);
-    durationLabel_->setPalette(dp);
+    Theme::setTextColor(durationLabel_, Theme::TextFaint);
     metaRow->addWidget(durationLabel_);
     metaRow->addStretch();
     infoCol->addLayout(metaRow);
@@ -727,7 +721,7 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     row->addWidget(waveform_, 1);
 
     auto *editBtn = new QPushButton(card_);
-    editBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("edit"), Theme::TextDim, 14)));
+    editBtn->setIcon(Theme::icon(QStringLiteral("edit"), Theme::TextDim, 14));
     editBtn->setToolTip(tr("Rename, re-trim or change this sound's volume."));
     editBtn->setFixedSize(30, 30);
     editBtn->setCursor(Qt::PointingHandCursor);
@@ -735,7 +729,7 @@ SoundboardSoundRow::SoundboardSoundRow(const QString &id, QWidget *parent)
     connect(editBtn, &QPushButton::clicked, this, [this] { emit editRequested(id_); });
 
     auto *removeBtn = new QPushButton(card_);
-    removeBtn->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("trash"), Theme::TextDim, 14)));
+    removeBtn->setIcon(Theme::icon(QStringLiteral("trash"), Theme::TextDim, 14));
     removeBtn->setToolTip(tr("Remove this sound from the soundboard."));
     removeBtn->setFixedSize(30, 30);
     removeBtn->setCursor(Qt::PointingHandCursor);
@@ -808,6 +802,7 @@ SoundboardSettingsWindow::SoundboardSettingsWindow(MixerClient *client, QWidget 
     outer->addWidget(tabs);
 
     connect(client_, &MixerClient::changed, this, &SoundboardSettingsWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     refresh();
 }
 
@@ -1354,6 +1349,7 @@ SoundboardWindow::SoundboardWindow(MixerClient *client, QWidget *parent)
     setSimpleView(simpleViewToggle_->isChecked());
 
     connect(client_, &MixerClient::changed, this, &SoundboardWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     refresh();
 }
 
@@ -1366,9 +1362,7 @@ QWidget *SoundboardWindow::buildTitleBar() {
     titleBar->setFixedWidth(kSoundboardWidth);
 
     countLabel_ = new QLabel(titleBar);
-    QPalette cp = countLabel_->palette();
-    cp.setColor(QPalette::WindowText, Theme::TextFaint);
-    countLabel_->setPalette(cp);
+    Theme::setTextColor(countLabel_, Theme::TextFaint);
     lay->addSpacing(8);
     lay->addWidget(countLabel_);
 
@@ -1393,7 +1387,7 @@ QWidget *SoundboardWindow::buildTitleBar() {
         lay->addWidget(Monarchy::pillGroup(titleBar, {settingsBtn_, addBtn_}, Theme::Bg));
     } else {
         auto *settings = new QPushButton(titleBar);
-        settings->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("gear"), Theme::Text, 15)));
+        settings->setIcon(Theme::icon(QStringLiteral("gear"), Theme::Text, 15));
         settings->setToolTip(settingsTip);
         settings->setCursor(Qt::PointingHandCursor);
         settings->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -1401,7 +1395,7 @@ QWidget *SoundboardWindow::buildTitleBar() {
         settingsBtn_ = settings;
 
         auto *add = new QPushButton(titleBar);
-        add->setIcon(QIcon(Theme::iconPixmap(QStringLiteral("plus"), Theme::Text, 14)));
+        add->setIcon(Theme::icon(QStringLiteral("plus"), Theme::Text, 14));
         add->setToolTip(tr("Add a sound..."));
         add->setCursor(Qt::PointingHandCursor);
         add->setFixedSize(kChromeBtnPx, kChromeBtnPx);
@@ -1460,7 +1454,7 @@ QWidget *SoundboardWindow::buildEmptyState() {
 
     auto *icon = new QLabel(emptyState_);
     icon->setAlignment(Qt::AlignCenter);
-    icon->setPixmap(Theme::iconPixmap(QStringLiteral("sfx"), Theme::TextFaint, 44));
+    Theme::setPixmap(icon, QStringLiteral("sfx"), Theme::TextFaint, 44);
     lay->addWidget(icon);
 
     auto *heading = new QLabel(tr("Your soundboard is empty"), emptyState_);

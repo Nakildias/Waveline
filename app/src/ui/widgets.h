@@ -17,6 +17,8 @@
 #include <QPointer>
 #include <QPropertyAnimation>
 #include <QSlider>
+
+#include "theme.h"
 #include <QString>
 #include <QWheelEvent>
 
@@ -95,7 +97,7 @@ private:
     qreal handleY() const;
     void setValueFromPos(int posY);
 
-    QColor accent_;
+    Theme::Live accent_;
     bool muted_ = false;
 };
 
@@ -124,7 +126,7 @@ private:
     qreal handleX() const;
     void setValueFromPos(int posX);
 
-    QColor accent_;
+    Theme::Live accent_;
 };
 
 // --------------------------------------------------------------------- Knob
@@ -159,7 +161,7 @@ protected:
     void wheelEvent(QWheelEvent *) override;
 
 private:
-    QColor accent_;
+    Theme::Live accent_;
     bool bipolar_ = false;
     int defaultValue_ = 0;
     bool hasDefaultValue_ = false;
@@ -187,7 +189,7 @@ protected:
     void leaveEvent(QEvent *) override;
 
 private:
-    QColor accent_;
+    Theme::Live accent_;
     bool hover_ = false;
 };
 
@@ -236,7 +238,7 @@ protected:
 
 private:
     QString on_, off_;
-    QColor accent_;
+    Theme::Live accent_;
     Shape shape_ = Round;
     int px_ = 18;
     bool hover_ = false;
@@ -263,7 +265,7 @@ protected:
 private:
     bool hover_ = false;
     // Defaults to the global "on" colour until a card claims it.
-    QColor accent_;
+    Theme::Live accent_;
 };
 
 // ------------------------------------------------------------------ CardBase
@@ -285,8 +287,8 @@ protected:
 
 private:
     int radius_ = 12;
-    QColor fill_;
-    QColor stripe_;
+    Theme::Live fill_;
+    Theme::Live stripe_;
 };
 
 // ------------------------------------------------------------------ Section
@@ -378,7 +380,7 @@ protected:
     void paintEvent(QPaintEvent *) override;
 
 private:
-    QColor color_;
+    Theme::Live color_;
 };
 
 // ------------------------------------------------------------- ElidedLabel

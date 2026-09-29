@@ -45,9 +45,7 @@ constexpr QColor kLinkColor(0x6e, 0xe7, 0xff);
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     l->setAlignment(Qt::AlignCenter);
     l->setWordWrap(true);
     return l;
@@ -170,18 +168,20 @@ AboutWindow::AboutWindow(QWidget *parent)
     updateBtn_->hide();
     updateBtn_->setToolTip(QString::fromLatin1(kInstallCommand));
     updateBtn_->setCursor(Qt::PointingHandCursor);
-    updateBtn_->setStyleSheet(QStringLiteral(
-        "QPushButton {"
-        "  background: %1;"
-        "  border: 1px solid %2;"
-        "  color: %3;"
-        "  padding: 7px 18px;"
-        "  border-radius: 7px;"
-        "}"
-        "QPushButton:hover { background: %2; }"
-        "QPushButton:pressed { background: %4; }")
-                                    .arg(Theme::AccentDim.name(), Theme::Accent.name(),
-                                         Theme::Text.name(), Theme::Accent.name()));
+    Theme::follow(updateBtn_, [this] {
+        updateBtn_->setStyleSheet(QStringLiteral(
+            "QPushButton {"
+            "  background: %1;"
+            "  border: 1px solid %2;"
+            "  color: %3;"
+            "  padding: 7px 18px;"
+            "  border-radius: 7px;"
+            "}"
+            "QPushButton:hover { background: %2; }"
+            "QPushButton:pressed { background: %4; }")
+                                        .arg(Theme::AccentDim.name(), Theme::Accent.name(),
+                                             Theme::Text.name(), Theme::Accent.name()));
+    });
     connect(updateBtn_, &QPushButton::clicked, this, &AboutWindow::copyInstallCommand);
     lay->addWidget(updateBtn_, 0, Qt::AlignHCenter);
 
@@ -195,8 +195,10 @@ AboutWindow::AboutWindow(QWidget *parent)
     line->setFrameShape(QFrame::HLine);
     line->setFrameShadow(QFrame::Plain);
     line->setFixedHeight(1);
-    line->setStyleSheet(
-        QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
+    Theme::follow(line, [line] {
+        line->setStyleSheet(
+            QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
+    });
     line->setFixedWidth(380);
     lay->addWidget(line, 0, Qt::AlignHCenter);
 

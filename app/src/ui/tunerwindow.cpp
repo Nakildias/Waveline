@@ -68,9 +68,7 @@ QFont scaledFont(const QFont &base, double factor, bool bold = false) {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -350,8 +348,10 @@ TunerWindow::TunerWindow(MixerClient *client, QWidget *parent)
     line->setFrameShape(QFrame::HLine);
     line->setFrameShadow(QFrame::Plain);
     line->setFixedHeight(1);
-    line->setStyleSheet(
-        QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
+    Theme::follow(line, [line] {
+        line->setStyleSheet(
+            QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
+    });
     lay->addWidget(line);
 
     dial_ = new TunerDial(card);
@@ -376,6 +376,7 @@ TunerWindow::TunerWindow(MixerClient *client, QWidget *parent)
     // The list of things to listen to is only as current as the daemon's node
     // list, and that changes when anything is plugged in.
     connect(client_, &MixerClient::changed, this, &TunerWindow::refreshSources);
+    Theme::onChange(this, [this] { refreshSources(); });
     // A daemon that went away took the tuner with it, so the next one has to
     // be told to start listening again even though nothing here changed.
     connect(client_, &MixerClient::availabilityChanged, this, [this] {
@@ -715,9 +716,7 @@ void TunerWindow::setStatus(const QString &text, bool error) {
     if (!statusLabel_) return;
     statusLabel_->setVisible(!text.isEmpty());
     statusLabel_->setText(text);
-    QPalette p = statusLabel_->palette();
-    p.setColor(QPalette::WindowText, error ? Theme::Warn : Theme::TextDim);
-    statusLabel_->setPalette(p);
+    Theme::setTextColor(statusLabel_, error ? Theme::Warn : Theme::TextDim);
 }
 
 // ----------------------------------------------------------------- ticks

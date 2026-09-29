@@ -25,9 +25,7 @@ namespace {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -207,9 +205,7 @@ SoundTrimDialog::SoundTrimDialog(MixerClient *client, const QString &sourcePath,
 
     statusLabel_ = new QLabel(this);
     statusLabel_->setWordWrap(true);
-    QPalette warnPal = statusLabel_->palette();
-    warnPal.setColor(QPalette::WindowText, Theme::Danger);
-    statusLabel_->setPalette(warnPal);
+    Theme::setTextColor(statusLabel_, Theme::Danger);
     statusLabel_->setVisible(false);
     lay->addWidget(statusLabel_);
 

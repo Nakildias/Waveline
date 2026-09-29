@@ -34,9 +34,7 @@ constexpr const char *kSuffix = ".wlprofile";
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -72,10 +70,12 @@ QLabel *activePill(QWidget *parent) {
     f.setPointSizeF(f.pointSizeF() * 0.78);
     f.setBold(true);
     l->setFont(f);
-    l->setStyleSheet(
-        QStringLiteral("color: %1; background: %2; border-radius: 6px; "
-                       "padding: 2px 7px;")
-            .arg(Theme::Accent.name(), Theme::AccentDim.name()));
+    Theme::follow(l, [l] {
+        l->setStyleSheet(
+            QStringLiteral("color: %1; background: %2; border-radius: 6px; "
+                           "padding: 2px 7px;")
+                .arg(Theme::Accent.name(), Theme::AccentDim.name()));
+    });
     return l;
 }
 
@@ -282,6 +282,7 @@ ProfilesWindow::ProfilesWindow(MixerClient *client, QWidget *parent)
     outer->addLayout(bottom);
 
     connect(client_, &MixerClient::changed, this, &ProfilesWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     connect(client_, &MixerClient::availabilityChanged, this,
             &ProfilesWindow::onAvailabilityChanged);
 

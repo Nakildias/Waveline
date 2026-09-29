@@ -46,6 +46,7 @@ AppsTab::AppsTab(MixerClient *client, QWidget *parent)
     lay->addWidget(empty_);
 
     connect(client_, &MixerClient::changed, this, &AppsTab::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     refresh();
 }
 
@@ -65,6 +66,8 @@ void AppsTab::refresh() {
     // Recolouring a card changes no application and no channel id, so without
     // this the badges would keep whatever colour they were built with.
     sig += QStringLiteral("looks%1").arg(Theme::cardLooksRevision());
+    // And the scheme: the rows copy its colours when they are built.
+    sig += QStringLiteral("light%1").arg(Theme::Light ? 1 : 0);
     if (sig == signature_) return;
     signature_ = sig;
 
