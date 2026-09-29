@@ -300,8 +300,9 @@ struct MasterBusInfo {
     bool primary = false;
     bool hwConnected = false;
     // What captureMatch is called, resolved by the daemon so it reads the same
-    // whether the device is plugged in or not. Empty for a bus that follows
-    // whatever the default input happens to be.
+    // whether the device is plugged in or not. For a bus that follows the
+    // default input, the device that default resolves to right now; empty only
+    // while there is none.
     QString deviceLabel;
     // Is that device here right now? A bus that follows the default input is
     // never reported as disconnected: it has no particular device to lose.

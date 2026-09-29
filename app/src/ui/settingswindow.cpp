@@ -45,9 +45,7 @@ QString framesLabel(int frames) {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     l->setWordWrap(true);
     return l;
 }
@@ -222,9 +220,7 @@ QWidget *SettingsWindow::buildLatencyTab() {
     headroomPending_ = new QLabel(page);
     headroomPending_->setWordWrap(true);
     headroomPending_->setVisible(false);
-    QPalette hp = headroomPending_->palette();
-    hp.setColor(QPalette::WindowText, Theme::Warn);
-    headroomPending_->setPalette(hp);
+    Theme::setTextColor(headroomPending_, Theme::Warn);
     headLay->addWidget(headroomPending_);
     lay->addWidget(headroom);
 
@@ -339,9 +335,7 @@ void SettingsWindow::syncDesktopTab() {
         shellStatus_->setText(present
                                   ? tr("A desktop shell is connected to this mixer.")
                                   : tr("No desktop shell is connected right now."));
-        QPalette p = shellStatus_->palette();
-        p.setColor(QPalette::WindowText, present ? Theme::Accent : Theme::TextDim);
-        shellStatus_->setPalette(p);
+        Theme::setTextColor(shellStatus_, present ? Theme::Accent : Theme::TextDim);
     }
 }
 
@@ -831,9 +825,7 @@ void SettingsWindow::refreshServices() {
                 QStringLiteral("systemctl --user start %1").arg(QLatin1String(s.unit)),
                 row);
             hint->setTextInteractionFlags(Qt::TextSelectableByMouse);
-            QPalette hp = hint->palette();
-            hp.setColor(QPalette::WindowText, Theme::TextDim);
-            hint->setPalette(hp);
+            Theme::setTextColor(hint, Theme::TextDim);
             rowLay->addWidget(hint);
         }
         servicesLay_->addWidget(row);

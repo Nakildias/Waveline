@@ -20,6 +20,8 @@
 #include <QColor>
 #include <QWidget>
 
+#include "theme.h"
+
 // Maps an amplitude -- RMS or peak, 0..1 -- onto a 0..1 bar position on a
 // logarithmic scale with a -60 dB floor.
 //
@@ -64,7 +66,7 @@ private:
     double peak_ = 0.0;
     double peakHoldMs_ = 0.0;
     int thickness_ = 8;
-    QColor tint_;   // invalid = use the ramp
+    Theme::Live tint_;   // invalid = use the ramp
 };
 
 // Drives every LevelMeter from one timer running at the screen's refresh rate,

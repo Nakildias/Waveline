@@ -17,6 +17,12 @@
 #include <QString>
 #include <QStringList>
 
+#include <functional>
+
+class QLabel;
+class QObject;
+class QWidget;
+
 namespace Theme {
 
 // ------------------------------------------------------------------ palette
@@ -154,5 +160,46 @@ QString styleSheet();
 // several widgets (tooltips, combo popups, text selection) paint from it
 // rather than from QSS.
 void apply();
+
+// ------------------------------------------------------------ live restyle
+// Monarchy switching between light and dark, or moving its accent, restyles
+// the open windows in place, the way the desktop's own applications do.
+// Anything painted by hand reads the colours above when it paints and needs
+// nothing more. Anything that copies a colour when it is built -- a card's
+// fill, a tinted icon, a widget's own style sheet -- does that copying inside
+// follow() instead: `fn` runs once now, and again after every change, for as
+// long as `context` is alive. Code that runs on every refresh names what it
+// sets with `key`, so a second call replaces the first instead of adding to it.
+void follow(QObject *context, std::function<void()> fn, const char *key = nullptr);
+// The same without the first run: for a window whose own refresh already
+// builds everything from the current colours, and only needs calling again.
+void onChange(QObject *context, std::function<void()> fn);
+
+// A widget's text in one of the colours above, kept in it across a change.
+// QPalette::WindowText unless another role is named.
+void setTextColor(QWidget *w, const QColor &c, int role = -1);
+// A label showing one of the bundled icons, re-tinted across a change.
+void setPixmap(QLabel *label, const QString &name, const QColor &c, int px);
+
+// &c when `c` is one of the palette colours above itself -- passed as
+// Theme::Text, not copied out of it -- or null.
+const QColor *token(const QColor &c);
+
+// A colour as a widget keeps it. Given one of the palette colours above, it
+// follows that colour through a scheme change; given anything else, it is
+// that colour. So `setFillColor(Theme::Card)` stays a card in either scheme
+// and `setFillColor(QColor(...))` stays what it was told.
+class Live {
+public:
+    Live() = default;
+    Live(const QColor &c) : value_(c), token_(token(c)) {}  // NOLINT: implicit on purpose
+    QColor get() const { return token_ ? *token_ : value_; }
+    operator QColor() const { return get(); }  // NOLINT
+    bool isValid() const { return get().isValid(); }
+
+private:
+    QColor value_;
+    const QColor *token_ = nullptr;
+};
 
 }  // namespace Theme

@@ -565,7 +565,6 @@ ChromeGroup::ChromeGroup(qreal radius, QWidget *parent) : QWidget(parent), radiu
 }
 
 void ChromeGroup::setChromeColour(const QColor &chrome) {
-    if (chrome_ == chrome) return;
     chrome_ = chrome;
     update();
 }
@@ -576,7 +575,7 @@ void ChromeGroup::paintEvent(QPaintEvent *) {
     QPainter p(this);
     style()->drawPrimitive(QStyle::PE_Widget, &option, &p, this);
     paintRimHighlight(&p, QRectF(rect()), radius_,
-                      chrome_.isValid() ? chrome_ : palette().color(QPalette::Window));
+                      chrome_.isValid() ? chrome_.get() : palette().color(QPalette::Window));
 }
 
 // ============================================================ toolbar pills

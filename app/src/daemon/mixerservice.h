@@ -873,6 +873,9 @@ private:
     // Records what each bus's device calls itself while it is plugged in, so
     // the name survives unplugging it. Returns whether anything changed.
     bool rememberMasterDeviceLabels();
+    QString masterLabelNode(const MasterBusState &m) const;
+    // Re-derives the auto names once the device a bus follows is known.
+    bool refreshAutoMasterNames();
     // Capture-node name -> measured capture delay in microseconds. Absent
     // means "not measured", which is not the same as zero and must never be
     // rendered as it.

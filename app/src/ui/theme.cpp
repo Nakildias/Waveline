@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QIconEngine>
+#include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
@@ -16,6 +18,9 @@
 #include <QStandardPaths>
 #include <QSvgRenderer>
 #include <QWidget>
+
+#include <algorithm>
+#include <vector>
 
 #include "monarchy/desktop.h"
 
@@ -95,6 +100,32 @@ void useMonarchyLight() {
     WarnGround = QColor(0xf6, 0xe8, 0xc4);
 }
 
+// follow()'s registrations. Removed when their context is destroyed rather
+// than on the next change: rows that are rebuilt on every refresh register
+// each time, and would otherwise pile up for as long as the scheme stays put.
+struct Follower {
+    QObject *context;
+    const char *key;
+    std::function<void()> fn;
+};
+std::vector<Follower> &followers() {
+    static std::vector<Follower> list;
+    return list;
+}
+
+void notifyFollowers() {
+    // A copy: a follower may rebuild widgets that register followers of their
+    // own, or destroy ones further down the list.
+    const std::vector<Follower> list = followers();
+    for (const Follower &f : list) {
+        const auto &live = followers();
+        const bool alive = std::any_of(live.begin(), live.end(), [&f](const Follower &l) {
+            return l.context == f.context;
+        });
+        if (alive) f.fn();
+    }
+}
+
 // Pushed in from the window on every refresh; read by everything that draws a
 // channel. A plain hash rather than anything cleverer: it is written once per
 // refresh and read a few dozen times, all on the GUI thread.
@@ -102,6 +133,80 @@ QHash<QString, CardLook> gLooks;
 int gLooksRevision = 0;
 
 }  // namespace
+
+const QColor *token(const QColor &c) {
+    static const QColor *const tokens[] = {
+        &Bg,   &Well,    &Card,      &CardHover, &Popup,        &Line,
+        &Inactive, &Text, &TextDim,  &TextFaint, &DangerGround, &WarnGround,
+        &Accent, &AccentDim, &Fader,
+    };
+    for (const QColor *t : tokens)
+        if (&c == t) return t;
+    return nullptr;
+}
+
+void follow(QObject *context, std::function<void()> fn, const char *key) {
+    fn();
+    if (!context) return;
+    auto &list = followers();
+    const bool known = std::any_of(list.begin(), list.end(), [context](const Follower &f) {
+        return f.context == context;
+    });
+    if (key) {
+        for (Follower &f : list) {
+            if (f.context == context && f.key && qstrcmp(f.key, key) == 0) {
+                f.fn = std::move(fn);
+                return;
+            }
+        }
+    }
+    list.push_back({context, key, std::move(fn)});
+    if (known) return;
+    QObject::connect(context, &QObject::destroyed, [context] {
+        auto &l = followers();
+        l.erase(std::remove_if(l.begin(), l.end(),
+                               [context](const Follower &f) { return f.context == context; }),
+                l.end());
+    });
+}
+
+void onChange(QObject *context, std::function<void()> fn) {
+    follow(context, [fn = std::move(fn), first = true]() mutable {
+        if (first) {
+            first = false;
+            return;
+        }
+        fn();
+    });
+}
+
+namespace {
+// follow()'s key for one palette role: one entry per role per widget.
+const char *roleKey(QPalette::ColorRole role) {
+    static const QList<QByteArray> keys = [] {
+        QList<QByteArray> out;
+        for (int i = 0; i < QPalette::NColorRoles; ++i)
+            out << QByteArray("palette-role-") + QByteArray::number(i);
+        return out;
+    }();
+    return keys.at(role).constData();
+}
+}  // namespace
+
+void setTextColor(QWidget *w, const QColor &c, int role) {
+    const auto r = role < 0 ? QPalette::WindowText : QPalette::ColorRole(role);
+    follow(w, [w, r, colour = Live(c)] {
+        QPalette p = w->palette();
+        p.setColor(r, colour.get());
+        w->setPalette(p);
+    }, roleKey(r));
+}
+
+void setPixmap(QLabel *label, const QString &name, const QColor &c, int px) {
+    follow(label, [label, name, px, colour = Live(c)] {
+        label->setPixmap(iconPixmap(name, colour.get(), px));
+    }, "pixmap");
+}
 
 void setCardLooks(const QHash<QString, CardLook> &looks) {
     gLooks = looks;
@@ -372,9 +477,52 @@ QIcon noneBadge(int px) {
     return QIcon(pm);
 }
 
+namespace {
+
+// An icon tinted with one of the palette colours, re-tinted when that colour
+// changes. Each request is answered by the same QIcon a fixed colour would
+// have produced, built from the colour as it is now, so it renders -- scaling,
+// the greyed-out disabled state -- exactly as that one does.
+class ThemedIconEngine : public QIconEngine {
+public:
+    ThemedIconEngine(const QString &name, const QColor *color, int px)
+        : name_(name), color_(color), px_(px) {}
+
+    void paint(QPainter *painter, const QRect &rect, QIcon::Mode mode,
+               QIcon::State state) override {
+        current().paint(painter, rect, Qt::AlignCenter, mode, state);
+    }
+    QPixmap pixmap(const QSize &size, QIcon::Mode mode, QIcon::State state) override {
+        return current().pixmap(size, mode, state);
+    }
+    QPixmap scaledPixmap(const QSize &size, QIcon::Mode mode, QIcon::State state,
+                         qreal scale) override {
+        return current().pixmap(size, scale, mode, state);
+    }
+    QSize actualSize(const QSize &size, QIcon::Mode mode, QIcon::State state) override {
+        return current().actualSize(size, mode, state);
+    }
+    bool isNull() override { return current().isNull(); }
+    QIconEngine *clone() const override { return new ThemedIconEngine(name_, color_, px_); }
+
+private:
+    QIcon current() const {
+        const QPixmap pm = iconPixmap(name_, *color_, px_);
+        return pm.isNull() ? QIcon() : QIcon(pm);
+    }
+
+    QString name_;
+    const QColor *color_;
+    int px_;
+};
+
+}  // namespace
+
 QIcon icon(const QString &name, const QColor &color, int px) {
     const QPixmap pm = iconPixmap(name, color, px);
-    return pm.isNull() ? QIcon() : QIcon(pm);
+    if (pm.isNull()) return QIcon();
+    if (const QColor *t = token(color)) return QIcon(new ThemedIconEngine(name, t, px));
+    return QIcon(pm);
 }
 
 QString css(const QColor &c) {
@@ -610,22 +758,21 @@ void apply() {
         if (Monarchy::isLight()) useMonarchyLight();
         else useMonarchyDark();
         followMonarchyAccent();
-        // The accent changed in Settings while the mixer is open: re-style
-        // everything, and repaint what draws itself from the colours above.
-        // Icons already rendered keep the old accent until they are rebuilt.
-        // A switch between light and dark is not handled here -- too much of
-        // the window holds colours it copied when it was built -- but by
-        // reopening the window; see main.cpp.
+        // The scheme or the accent changed in Settings while the mixer is
+        // open: re-style everything, re-run what copied a colour when it was
+        // built (see follow()), and repaint what draws itself from the colours
+        // above. The window stays where it is, as Monarchy's own do.
         static bool watching = false;
         if (!watching) {
             watching = true;
             QObject::connect(&Monarchy::Settings::instance(), &Monarchy::Settings::changed,
                              qApp, [] {
-                if (Monarchy::isLight() != Light) return;
+                const bool flipped = Monarchy::isLight() != Light;
                 const QColor before = Accent;
                 followMonarchyAccent();
-                if (Accent == before) return;
+                if (!flipped && Accent == before) return;
                 apply();
+                notifyFollowers();
                 for (QWidget *w : QApplication::allWidgets()) w->update();
             });
         }

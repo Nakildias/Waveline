@@ -33,9 +33,7 @@ constexpr int kAppIconPx = 18;
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -59,9 +57,7 @@ QWidget *makeVolumeRow(QWidget *parent, TrackSlider **outSlider, QLabel **outPct
     pct->setMinimumWidth(40);
     pct->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     if (!enabled) {
-        QPalette p = pct->palette();
-        p.setColor(QPalette::WindowText, Theme::TextFaint);
-        pct->setPalette(p);
+        Theme::setTextColor(pct, Theme::TextFaint);
     }
 
     lay->addWidget(slider, 1);
@@ -171,6 +167,7 @@ SoundSharingTab::SoundSharingTab(MixerClient *client, QWidget *parent)
     lay->addWidget(empty_);
 
     connect(client_, &MixerClient::changed, this, &SoundSharingTab::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     refresh();
 }
 
@@ -224,6 +221,8 @@ void SoundSharingTab::refresh() {
     // The sliders and badges here are drawn in their channel's colour, and a
     // recolour changes nothing else in this signature.
     sig += QStringLiteral("looks%1").arg(Theme::cardLooksRevision());
+    // And the scheme: the rows copy its colours when they are built.
+    sig += QStringLiteral("light%1").arg(Theme::Light ? 1 : 0);
     if (sig == signature_) return;
     signature_ = sig;
 
@@ -300,8 +299,10 @@ void SoundSharingTab::refresh() {
             sep->setFrameShape(QFrame::HLine);
             sep->setFrameShadow(QFrame::Plain);
             sep->setFixedHeight(1);
-            sep->setStyleSheet(
-                QStringLiteral("background: %1; border: none;").arg(Theme::css(Theme::Line)));
+            Theme::follow(sep, [sep] {
+                sep->setStyleSheet(QStringLiteral("background: %1; border: none;")
+                                       .arg(Theme::css(Theme::Line)));
+            });
             cl->addSpacing(2);
             cl->addWidget(sep);
         }

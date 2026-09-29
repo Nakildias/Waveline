@@ -209,7 +209,7 @@ void Fader::paintEvent(QPaintEvent *) {
     if (filled.height() > 0) {
         QPainterPath fp;
         fp.addRoundedRect(filled, kGrooveW / 2.0, kGrooveW / 2.0);
-        QColor c = isEnabled() ? accent_ : Theme::Inactive;
+        QColor c = isEnabled() ? accent_.get() : Theme::Inactive;
         // Held back from full saturation: six neon strips at once is a lot of
         // colour for something that is only meant to identify the channel.
         c.setAlpha(muted_ ? 60 : 190);
@@ -320,7 +320,7 @@ void TrackSlider::paintEvent(QPaintEvent *) {
     if (filled.width() > 0) {
         QPainterPath fp;
         fp.addRoundedRect(filled, kTrackGrooveH / 2.0, kTrackGrooveH / 2.0);
-        QColor c = isEnabled() ? accent_ : Theme::Inactive;
+        QColor c = isEnabled() ? accent_.get() : Theme::Inactive;
         p.fillPath(fp, c);
     }
 
@@ -569,7 +569,7 @@ void PowerSwitch::paintEvent(QPaintEvent *) {
     QRectF half = r;
     half.setHeight(r.height() / 2.0);
     if (on) half.moveTop(r.center().y());
-    QColor paddle = isEnabled() ? (on ? accent_ : Theme::Danger) : QColor(60, 60, 64);
+    QColor paddle = isEnabled() ? (on ? accent_.get() : Theme::Danger) : QColor(60, 60, 64);
     p.fillRect(half.adjusted(1.5, 1.5, -1.5, -1.5), paddle);
     p.restore();
 
@@ -788,7 +788,7 @@ void CardBase::paintEvent(QPaintEvent *) {
 
     QPainterPath path;
     path.addRoundedRect(QRectF(rect()), radius_, radius_);
-    p.fillPath(path, fill_);
+    p.fillPath(path, fill_.get());
 
     if (stripe_.isValid()) {
         p.save();
@@ -970,7 +970,7 @@ StatusDot::StatusDot(QWidget *parent) : QWidget(parent) {
 QSize StatusDot::sizeHint() const { return {10, 10}; }
 
 void StatusDot::setColor(const QColor &c) {
-    if (color_ == c) return;
+    if (color_.get() == c) return;
     color_ = c;
     update();
 }
@@ -1031,9 +1031,7 @@ QLabel *caption(const QString &text, QWidget *parent) {
     f.setBold(true);
     f.setLetterSpacing(QFont::AbsoluteSpacing, 1.1);
     l->setFont(f);
-    QPalette pal = l->palette();
-    pal.setColor(QPalette::WindowText, Theme::TextFaint);
-    l->setPalette(pal);
+    Theme::setTextColor(l, Theme::TextFaint);
     return l;
 }
 
@@ -1041,8 +1039,6 @@ QLabel *fixedReadout(const QString &widest, QWidget *parent) {
     auto *l = new QLabel(widest, parent);
     l->setFixedWidth(l->fontMetrics().horizontalAdvance(widest) + 6);
     l->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    QPalette pal = l->palette();
-    pal.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(pal);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }

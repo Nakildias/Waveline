@@ -61,6 +61,10 @@ public:
     // Opens the tuner and hands it back, so its layout can be grabbed the same
     // way the main window's is.
     QWidget *openTunerWindow();
+    // The same for any of the other windows, by name: tuner, soundboard,
+    // companion, settings, profiles, about, effects, rack, channel-effects.
+    // Null for a name it does not know.
+    QWidget *openWindowForScreenshot(const QString &which);
 
 protected:
     void showEvent(QShowEvent *) override;

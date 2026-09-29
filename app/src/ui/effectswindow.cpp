@@ -74,9 +74,7 @@ void keepTabSelected(QTabWidget *tabs, const QString &label) {
 
 QLabel *dimLabel(const QString &text, QWidget *parent) {
     auto *l = new QLabel(text, parent);
-    QPalette p = l->palette();
-    p.setColor(QPalette::WindowText, Theme::TextDim);
-    l->setPalette(p);
+    Theme::setTextColor(l, Theme::TextDim);
     return l;
 }
 
@@ -241,41 +239,43 @@ QWidget *defaultResetRow(QWidget *parent, const std::function<void()> &onDefault
 void styleEffectsTabs(QTabWidget *tabs) {
     tabs->setDocumentMode(false);
     tabs->tabBar()->setExpanding(true);
-    tabs->setStyleSheet(QStringLiteral(
-        "QTabWidget::pane {"
-        "  border: 1px solid %1;"
-        "  border-radius: 0 0 6px 6px;"
-        "  background: %2;"
-        "  top: -1px;"
-        "}"
-        "QTabBar::tab {"
-        "  background: %3;"
-        "  color: %4;"
-        "  border: 1px solid %1;"
-        "  border-bottom: none;"
-        "  border-top-left-radius: 6px;"
-        "  border-top-right-radius: 6px;"
-        "  padding: 5px 14px;"
-        "  margin-right: 4px;"
-        "}"
-        "QTabBar::tab:selected {"
-        "  background: %2;"
-        "  color: #ffffff;"
-        "  border: 1px solid %1;"
-        "  border-bottom: 1px solid %2;"
-        "  font-weight: bold;"
-        "}"
-        "QTabBar::tab:!selected:hover {"
-        "  background: %5;"
-        "  color: %6;"
-        "}"
-        "QTabBar::tab:disabled {"
-        "  color: %7;"
-        "  background: %3;"
-        "}")
-                            .arg(Theme::css(Theme::Line), Theme::css(Theme::Card), Theme::css(Theme::Well),
-                                 Theme::TextDim.name(), Theme::css(Theme::CardHover),
-                                 Theme::Text.name(), Theme::TextFaint.name()));
+    Theme::follow(tabs, [tabs] {
+        tabs->setStyleSheet(QStringLiteral(
+            "QTabWidget::pane {"
+            "  border: 1px solid %1;"
+            "  border-radius: 0 0 6px 6px;"
+            "  background: %2;"
+            "  top: -1px;"
+            "}"
+            "QTabBar::tab {"
+            "  background: %3;"
+            "  color: %4;"
+            "  border: 1px solid %1;"
+            "  border-bottom: none;"
+            "  border-top-left-radius: 6px;"
+            "  border-top-right-radius: 6px;"
+            "  padding: 5px 14px;"
+            "  margin-right: 4px;"
+            "}"
+            "QTabBar::tab:selected {"
+            "  background: %2;"
+            "  color: %6;"
+            "  border: 1px solid %1;"
+            "  border-bottom: 1px solid %2;"
+            "  font-weight: bold;"
+            "}"
+            "QTabBar::tab:!selected:hover {"
+            "  background: %5;"
+            "  color: %6;"
+            "}"
+            "QTabBar::tab:disabled {"
+            "  color: %7;"
+            "  background: %3;"
+            "}")
+                                .arg(Theme::css(Theme::Line), Theme::css(Theme::Card), Theme::css(Theme::Well),
+                                     Theme::TextDim.name(), Theme::css(Theme::CardHover),
+                                     Theme::Text.name(), Theme::TextFaint.name()));
+    });
 }
 
 QTabWidget *createEffectCategoryTabs(QWidget *parent) {
@@ -827,26 +827,28 @@ QString lufsReadout(int tenths) {
 
 void styleEarProtectionSlider(QSlider *slider, int lufsTenths) {
     if (!slider) return;
-    const double lufs = lufsTenths / 10.0;
-    QColor groove = Theme::CardHover;
-    QColor fill = Theme::AccentDim;
-    QColor handle = Theme::Fader;
-    if (lufs >= -12.0) {
-        groove = Theme::Danger.darker(140);
-        fill = Theme::Danger;
-        handle = Theme::Danger;
-    } else if (lufs >= -18.0) {
-        groove = Theme::Warn.darker(140);
-        fill = Theme::Warn;
-        handle = Theme::Warn;
-    }
-    slider->setStyleSheet(QStringLiteral(
-        "QSlider::groove:horizontal { height: 6px; background: %1; border-radius: 3px; }"
-        "QSlider::sub-page:horizontal { background: %2; border-radius: 3px; }"
-        "QSlider::add-page:horizontal { background: %1; border-radius: 3px; }"
-        "QSlider::handle:horizontal { background: %3; width: 14px; margin: -4px 0; "
-        "border-radius: 7px; }")
-                              .arg(groove.name(), fill.name(), handle.name()));
+    Theme::follow(slider, [slider, lufsTenths] {
+        const double lufs = lufsTenths / 10.0;
+        QColor groove = Theme::CardHover;
+        QColor fill = Theme::AccentDim;
+        QColor handle = Theme::Fader;
+        if (lufs >= -12.0) {
+            groove = Theme::Danger.darker(140);
+            fill = Theme::Danger;
+            handle = Theme::Danger;
+        } else if (lufs >= -18.0) {
+            groove = Theme::Warn.darker(140);
+            fill = Theme::Warn;
+            handle = Theme::Warn;
+        }
+        slider->setStyleSheet(QStringLiteral(
+            "QSlider::groove:horizontal { height: 6px; background: %1; border-radius: 3px; }"
+            "QSlider::sub-page:horizontal { background: %2; border-radius: 3px; }"
+            "QSlider::add-page:horizontal { background: %1; border-radius: 3px; }"
+            "QSlider::handle:horizontal { background: %3; width: 14px; margin: -4px 0; "
+            "border-radius: 7px; }")
+                                  .arg(groove.name(), fill.name(), handle.name()));
+    }, "ear-protection");
 }
 
 void applyLufsLimiterControlDependencies(LufsLimiterControls &ui, bool editable) {
@@ -1715,6 +1717,7 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
     }
 
     connect(client_, &MixerClient::changed, this, &GlobalEffectsWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     connect(client_, &MixerClient::levelsChanged, this,
             &GlobalEffectsWindow::refreshLevels);
     applyMicDependencies();
@@ -2135,6 +2138,19 @@ void GlobalEffectsWindow::refreshCaptureDevices() {
     }
     QSignalBlocker block(captureDevice_);
     captureDevice_->clear();
+    // Only the primary input can follow the default; the others need a device.
+    // Without its own entry, an input following the default showed whichever
+    // device happened to be listed first, which looks exactly like having
+    // picked it -- so nobody could tell which mode they were in.
+    if (isPrimary()) {
+        const QString text = label.isEmpty() || !current.isEmpty()
+                                 ? tr("System default")
+                                 : tr("System default (%1)").arg(label);
+        captureDevice_->addItem(text, QString());
+        captureDevice_->setItemData(
+            0, tr("Follow the system's default input, whichever device that is."),
+            Qt::ToolTipRole);
+    }
     for (const CaptureDeviceInfo &d : client_->captureDevices()) {
         captureDevice_->addItem(d.description, d.nodeName);
         captureDevice_->setItemData(captureDevice_->count() - 1, d.description,
@@ -2941,6 +2957,7 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
     });
 
     connect(client_, &MixerClient::changed, this, &ChannelEffectsWindow::refresh);
+    Theme::onChange(this, [this] { refresh(); });
     connect(client_, &MixerClient::levelsChanged, this,
             &ChannelEffectsWindow::refreshInputLevels);
     setMicTabEnabled(false);

@@ -23,6 +23,8 @@
 #include <QColor>
 #include <QWidget>
 
+#include "../theme.h"
+
 #include <initializer_list>
 
 class QAbstractButton;
@@ -79,7 +81,7 @@ protected:
 
 private:
     qreal radius_;
-    QColor chrome_;
+    Theme::Live chrome_;
 };
 
 // A toolbar button: a transparent circle inside a ChromeGroup that lights up
