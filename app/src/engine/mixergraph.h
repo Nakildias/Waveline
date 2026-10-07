@@ -135,6 +135,10 @@ struct MasterBusRuntime {
     bool micMonitorFx = false;
     bool softwareMonitor = false;
     bool micStereo = true;
+    int captureChannels = 1;
+    int captureMode = 0; // Stereo, left, right, averaged mono.
+    bool stereoMix() const { return micStereo || captureChannels == 2; }
+    float monitorLeft = 1.0f, monitorRight = 1.0f;
     bool wantSoftwareGain = false;
     std::string captureNode;
     std::string midiNode;
@@ -263,6 +267,12 @@ public:
                                     bool on);
     // Returns true only when a new NC filter node was created (needs rewire).
     bool ensureChannelNoiseFilter(const std::string &channelId, FxStage stage);
+    // Pauses every *microphone* noise filter -- each input device's own and
+    // each channel's mic NC -- without touching its on/off setting, for while
+    // nothing can hear the processed microphone. App-audio (output stage) NC
+    // is left alone. Filters built later start in the same state.
+    void setMicNoiseIdle(bool idle);
+    bool micNoiseIdle() const { return micNoiseIdle_; }
     // Gain of this channel's own published microphone, 0..1+. Named "micSend"
     // for continuity with the config key; it is a level, not a send.
     bool setChannelMicSend(const std::string &channelId, float level);
@@ -478,7 +488,9 @@ private:
     const MasterBusRuntime *primaryMaster() const;
 
     bool isUsableMicNode(const PwNode &n) const;
-    std::string masterCapturePort(const MasterBusRuntime &bus) const;
+    std::string masterCapturePort(const MasterBusRuntime &bus, int channel = 0) const;
+    std::string rightPort(const std::string &node, const std::string &left) const;
+    int captureWidth(const MasterBusRuntime &bus) const;
     bool resolveMasterChain(const MasterBusRuntime &bus, std::string &dryNode,
                             std::string &dryPort, std::string &fxNode,
                             std::string &fxPort) const;
@@ -556,6 +568,7 @@ private:
     bool pendingWantMicGain_ = false;
     NoiseEngine engine_ = NoiseEngine::RnNoise;
     NoiseEngine requestedEngine_ = NoiseEngine::RnNoise;
+    bool micNoiseIdle_ = false;
     std::vector<MasterBusRuntime> masterBuses_;
     std::unordered_map<std::string, ChannelChain> chChains_;
     std::vector<Channel> channels_;

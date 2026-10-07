@@ -59,6 +59,8 @@ private:
     // Nothing to ask about and nothing to put back: this one applies live and
     // rebuilds nothing, so the click *is* the setting.
     void onDspProfilingToggled(bool on);
+    // Applies live, like the box above.
+    void onNcAutoPauseToggled(bool on);
     // Applies live and rebuilds nothing -- a shell re-reads the count on its
     // next poll -- so the change *is* the setting, same as the box above.
     void onShellNcInputsChanged(int count);
@@ -68,6 +70,7 @@ private:
     void syncHeadroomCombo();
     void syncRealtimeCheck();
     void syncDspProfilingCheck();
+    void syncNcAutoPause();
     void syncDesktopTab();
 
     void refreshWarnings();
@@ -81,6 +84,8 @@ private:
     QLabel *headroomPending_ = nullptr;
     QCheckBox *realtimeCheck_ = nullptr;
     QCheckBox *dspProfilingCheck_ = nullptr;
+    QCheckBox *ncAutoPauseCheck_ = nullptr;
+    QLabel *ncAutoPauseStatus_ = nullptr;
     QSpinBox *shellNcSpin_ = nullptr;
     QLabel *shellStatus_ = nullptr;
     // Set while a sync is writing into a combo, so the resulting activated

@@ -75,6 +75,7 @@ struct Path {
     std::string captureName;   // node we set volume on
     std::string target;
     float volume = 1.0f;
+    float left = 1.0f, right = 1.0f;
     bool muted = false;
     int channels = 2;
     bool sourceIsSink = true;
@@ -142,6 +143,7 @@ struct PwEngine::Impl {
     };
     std::map<uint32_t, PortRef> ports;
     std::function<void()> onGraphChanged;
+    std::function<void()> onLinksChanged;
     std::function<void()> onDefaultSourceChanged;
     std::function<void(const PwNode &)> onNodeAdded;
     std::function<void(const PwNode &)> onNodeRemoved;
@@ -349,6 +351,10 @@ void applyNodeProps(PwNode &n, const spa_dict *props) {
         n.processBinary = v;
     if ((v = spa_dict_lookup(props, PW_KEY_CLIENT_ID)))
         n.clientId = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+    if ((v = spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL))) n.objectSerial = v;
+    if ((v = spa_dict_lookup(props, PW_KEY_TARGET_OBJECT))) n.captureTarget = v;
+    if ((v = spa_dict_lookup(props, PW_KEY_STREAM_CAPTURE_SINK)))
+        n.capturesSink = isTruthyProp(v);
     // Which ALSA PCM is behind this node, so its latency can be read from the
     // kernel rather than computed. Present on hardware nodes only, and absent
     // on our own filters and on every application stream.
@@ -459,11 +465,17 @@ struct StreamWatch {
     PwEngine::Impl *impl = nullptr;
     spa_hook listener{};
     uint32_t id = 0;
+    // Recording streams are held back from onNodeAdded until their first info
+    // event: what they record (target.object, stream.capture.sink) is not in
+    // the registry announce, and announcing without it would call every
+    // visualiser a microphone for the moment it takes to arrive.
+    bool announced = true;
 };
 
 void onStreamNodeInfo(void *data, const struct pw_node_info *info) {
     auto *watch = static_cast<StreamWatch *>(data);
-    if (!(info->change_mask & PW_NODE_CHANGE_MASK_PROPS) || !info->props) return;
+    const bool hasProps = (info->change_mask & PW_NODE_CHANGE_MASK_PROPS) && info->props;
+    if (!hasProps && watch->announced) return;
 
     bool notify = false;
     PwNode copy;
@@ -472,11 +484,14 @@ void onStreamNodeInfo(void *data, const struct pw_node_info *info) {
         auto it = watch->impl->nodes.find(watch->id);
         if (it == watch->impl->nodes.end()) return;
         const uint32_t prevPid = it->second.processId;
-        applyNodeProps(it->second, info->props);
-        resolveClientProcess(it->second, *watch->impl);
-        if (it->second.description.empty()) it->second.description = it->second.name;
+        if (hasProps) {
+            applyNodeProps(it->second, info->props);
+            resolveClientProcess(it->second, *watch->impl);
+            if (it->second.description.empty()) it->second.description = it->second.name;
+        }
         copy = it->second;
-        notify = prevPid == 0 && it->second.processId != 0;
+        notify = !watch->announced || (prevPid == 0 && it->second.processId != 0);
+        watch->announced = true;
     }
     if (notify && watch->impl->onNodeAdded) watch->impl->onNodeAdded(copy);
 }
@@ -582,21 +597,26 @@ void bindDeviceWatch(PwEngine::Impl *impl, uint32_t id, const PwNode &n) {
     impl->streamProxies[id] = proxy;
 }
 
-void bindStreamWatch(PwEngine::Impl *impl, uint32_t id, const PwNode &n) {
-    if (n.isOurs || n.mediaClass != "Stream/Output/Audio") return;
-    if (impl->streamProxies.count(id)) return;
+// True when the node's announce is now deferred to its first info event.
+bool bindStreamWatch(PwEngine::Impl *impl, uint32_t id, const PwNode &n) {
+    if (n.isOurs) return false;
+    const bool recording = n.mediaClass == "Stream/Input/Audio";
+    if (!recording && n.mediaClass != "Stream/Output/Audio") return false;
+    if (impl->streamProxies.count(id)) return false;
 
     auto *proxy = static_cast<pw_proxy *>(pw_registry_bind(
         impl->registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE,
         sizeof(StreamWatch)));
-    if (!proxy) return;
+    if (!proxy) return false;
 
     auto *watch = static_cast<StreamWatch *>(pw_proxy_get_user_data(proxy));
     watch->impl = impl;
     watch->id = id;
+    watch->announced = !recording;
     pw_node_add_listener(reinterpret_cast<pw_node *>(proxy), &watch->listener,
                          &kStreamNodeEvents, watch);
     impl->streamProxies[id] = proxy;
+    return recording;
 }
 
 struct DeviceWatch {
@@ -701,8 +721,11 @@ void onRegistryGlobal(void *data, uint32_t id, uint32_t /*permissions*/,
                 inPort = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
         }
         if (outPort && inPort) {
-            std::lock_guard<std::mutex> lock(impl->nodesMutex);
-            impl->pipewireLinks[id] = {outPort, inPort};
+            {
+                std::lock_guard<std::mutex> lock(impl->nodesMutex);
+                impl->pipewireLinks[id] = {outPort, inPort};
+            }
+            if (impl->onLinksChanged) impl->onLinksChanged();
         }
         return;
     }
@@ -748,10 +771,10 @@ void onRegistryGlobal(void *data, uint32_t id, uint32_t /*permissions*/,
         copy = n;
         impl->nodes[id] = std::move(n);
     }
-    bindStreamWatch(impl, id, copy);
+    const bool deferred = bindStreamWatch(impl, id, copy);
     bindDeviceWatch(impl, id, copy);
     bindOwnNodeWatch(impl, id, copy);
-    if (impl->onNodeAdded) impl->onNodeAdded(copy);
+    if (!deferred && impl->onNodeAdded) impl->onNodeAdded(copy);
 
     // A path's volume cannot be set until its node exists, and the node appears
     // asynchronously well after the module is loaded. Anything requested in the
@@ -800,9 +823,10 @@ void onRegistryGlobalRemove(void *data, uint32_t id) {
     }
     PwNode removed;
     bool erased;
+    bool linkErased;
     {
         std::lock_guard<std::mutex> lock(impl->nodesMutex);
-        impl->pipewireLinks.erase(id);
+        linkErased = impl->pipewireLinks.erase(id) > 0;
         impl->ports.erase(id);
         impl->clients.erase(id);
         auto nit = impl->nodes.find(id);
@@ -820,6 +844,7 @@ void onRegistryGlobalRemove(void *data, uint32_t id) {
             erased = false;
         }
     }
+    if (linkErased && impl->onLinksChanged) impl->onLinksChanged();
     if (erased && impl->onNodeRemoved) impl->onNodeRemoved(removed);
     if (erased && impl->onGraphChanged) impl->onGraphChanged();
 }
@@ -841,6 +866,10 @@ PwEngine::~PwEngine() { stop(); }
 
 void PwEngine::setOnGraphChanged(std::function<void()> cb) {
     d_->onGraphChanged = std::move(cb);
+}
+
+void PwEngine::setOnLinksChanged(std::function<void()> cb) {
+    d_->onLinksChanged = std::move(cb);
 }
 
 void PwEngine::setOnDefaultSourceChanged(std::function<void()> cb) {
@@ -909,6 +938,24 @@ bool PwEngine::streamSinkNode(uint32_t streamNodeId, PwNode &out) const {
         }
     }
     return found;
+}
+
+bool PwEngine::captureFeedNode(const PwNode &stream, PwNode &out) const {
+    if (streamSourceNode(stream.id, out)) return true;
+    if (stream.captureTarget.empty()) return false;
+    std::lock_guard<std::mutex> lock(d_->nodesMutex);
+    for (const auto &[id, node] : d_->nodes) {
+        if (id == stream.id) continue;
+        if (node.objectSerial == stream.captureTarget || node.name == stream.captureTarget) {
+            out = node;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PwEngine::isPlaybackFeed(const PwNode &feed) {
+    return feed.mediaClass == "Audio/Sink" || feed.mediaClass.rfind("Stream/Output", 0) == 0;
 }
 
 bool PwEngine::streamSourceNode(uint32_t streamNodeId, PwNode &out) const {
@@ -1277,7 +1324,7 @@ void applyVolumeLocked(PwEngine::Impl *impl, uint32_t nodeId, const Path &p) {
 
     float vols[SPA_AUDIO_MAX_CHANNELS];
     const int n = p.channels > 0 ? p.channels : 2;
-    for (int i = 0; i < n; ++i) vols[i] = p.muted ? 0.0f : p.volume;
+    for (int i = 0; i < n; ++i) vols[i] = p.muted ? 0.0f : p.volume * (i == 1 ? p.right : p.left);
 
     uint8_t buffer[1024];
     spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -1293,6 +1340,25 @@ void applyVolumeLocked(PwEngine::Impl *impl, uint32_t nodeId, const Path &p) {
 }
 
 }  // namespace
+
+bool PwEngine::linkToVirtualSource(const std::string &source, const std::string &left,
+                                   const std::string &right, const std::string &target,
+                                   std::string &error) {
+    if (hasPort(target, "input_MONO", false)) {
+        return linkPorts(source, left, target, "input_MONO", error) &&
+            (left == right || linkPorts(source, right, target, "input_MONO", error));
+    }
+    return linkPorts(source, left, target, "input_FL", error) &&
+           linkPorts(source, right, target, "input_FR", error);
+}
+
+bool PwEngine::setPathChannelGains(const std::string &handle, float left, float right) {
+    auto it = d_->paths.find(handle);
+    if (it == d_->paths.end()) return false;
+    it->second.left = left;
+    it->second.right = right;
+    return setPathVolume(handle, it->second.volume);
+}
 
 bool PwEngine::setPathVolume(const std::string &handle, float volume) {
     auto it = d_->paths.find(handle);
@@ -1378,6 +1444,7 @@ bool PwEngine::setPathTarget(const std::string &handle, const std::string &targe
     if (!addPath(handle, old.source, target, old.description, old.channels,
                  old.sourceIsSink, error))
         return false;
+    setPathChannelGains(handle, old.left, old.right);
     setPathVolume(handle, old.volume);
     setPathMuted(handle, old.muted);
     return true;

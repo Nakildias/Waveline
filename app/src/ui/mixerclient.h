@@ -512,6 +512,12 @@ public:
     bool dspProfiling() const;
     void setDspProfiling(bool on);
 
+    // Pause microphone noise suppression while nothing is listening to it.
+    // Applies live. noiseSuppressionPaused() is whether that is happening now.
+    bool autoPauseNoiseSuppression() const;
+    void setAutoPauseNoiseSuppression(bool on);
+    bool noiseSuppressionPaused() const;
+
     // How many input devices get a noise-suppression switch in a desktop
     // shell's microphone panel, and whether such a shell is running at all.
     // See MixerService::ShellInputs for the whole of what that surface is.
@@ -645,6 +651,11 @@ public:
                                     double value);
 
     bool masterMicMonitorFx(const QString &masterId) const;
+    int masterCaptureMode(const QString &masterId) const;
+    void setMasterCaptureMode(const QString &masterId, int mode);
+    int masterCaptureChannels(const QString &masterId) const;
+    QStringList masterMonitorChannels(const QString &masterId) const;
+    void setMasterMonitorChannel(const QString &masterId, int channel, double volume, bool muted);
     bool masterMicStereo(const QString &masterId) const;
     double masterMicInputVolume(const QString &masterId) const;
     bool masterMicInputMuted(const QString &masterId) const;
@@ -794,6 +805,9 @@ signals:
     void levelsChanged();
     void availabilityChanged(bool available);
 
+private slots:
+    void scheduleRefresh();
+
 private:
     template <typename T>
     T get(const char *method, const T &fallback = {}) const;
@@ -813,10 +827,12 @@ private:
     mutable bool hasHardwareControls_ = false;
 
     QDBusInterface *iface_ = nullptr;
-    QTimer poll_;        // full state: everything a person can change
+    QTimer poll_;        // slow reconciliation; Changed drives control updates
     QTimer levelPoll_;   // meters only, one round trip
     QTimer reconnect_;
+    QTimer refreshPending_;
     QHash<QString, double> levelCache_;
     QList<ChannelInfo> channelCache_;
     bool available_ = false;
+    bool pollingEnabled_ = true;
 };

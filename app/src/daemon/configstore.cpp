@@ -301,6 +301,11 @@ QJsonObject ConfigStore::toJson(const Profile &in) {
         mb[QStringLiteral("deEsserIntensity")] = m.deEsserIntensity;
         mb[QStringLiteral("softwareMonitor")] = m.softwareMonitor;
         mb[QStringLiteral("micStereo")] = m.micStereo;
+        mb[QStringLiteral("captureMode")] = m.captureMode;
+        mb[QStringLiteral("monitorLeft")] = m.monitorLeft;
+        mb[QStringLiteral("monitorRight")] = m.monitorRight;
+        mb[QStringLiteral("monitorLeftMuted")] = m.monitorLeftMuted;
+        mb[QStringLiteral("monitorRightMuted")] = m.monitorRightMuted;
         mb[QStringLiteral("micInputVolume")] = m.micInputVolume;
         mb[QStringLiteral("micInputMuted")] = m.micInputMuted;
         mb[QStringLiteral("hardwareMonitor")] = m.hardwareMonitor;
@@ -633,6 +638,11 @@ Profile ConfigStore::fromJson(const QJsonObject &o) {
                                     ? mb[QStringLiteral("softwareMonitor")].toBool(false)
                                     : isPrimary ? p.softwareMonitor : false;
             m.micStereo = mb[QStringLiteral("micStereo")].toBool(true);
+            m.captureMode = std::clamp(mb[QStringLiteral("captureMode")].toInt(0), 0, 3);
+            m.monitorLeft = std::clamp(mb[QStringLiteral("monitorLeft")].toDouble(1.0), 0.0, 1.0);
+            m.monitorRight = std::clamp(mb[QStringLiteral("monitorRight")].toDouble(1.0), 0.0, 1.0);
+            m.monitorLeftMuted = mb[QStringLiteral("monitorLeftMuted")].toBool(false);
+            m.monitorRightMuted = mb[QStringLiteral("monitorRightMuted")].toBool(false);
             m.micInputVolume = mb[QStringLiteral("micInputVolume")].toDouble(1.0);
             m.micInputMuted = mb[QStringLiteral("micInputMuted")].toBool(false);
             m.hardwareMonitor = mb[QStringLiteral("hardwareMonitor")].toInt(-1);
@@ -931,6 +941,8 @@ bool ConfigStore::load() {
     // existed: a missing key must mean "the way it has always worked", not
     // "off". toBool's default argument is doing that job.
     audio_.realtime = audio[QStringLiteral("realtime")].toBool(true);
+    audio_.autoPauseNoiseSuppression =
+        audio[QStringLiteral("autoPauseNoiseSuppression")].toBool(true);
 
     const QJsonObject diagnostics = root[QStringLiteral("diagnostics")].toObject();
     diagnostics_.dismissedRoutingSinks.clear();
@@ -1008,6 +1020,7 @@ bool ConfigStore::save() const {
     audio[QStringLiteral("graphQuantum")] = audio_.graphQuantum;
     audio[QStringLiteral("outputHeadroom")] = audio_.outputHeadroom;
     audio[QStringLiteral("realtime")] = audio_.realtime;
+    audio[QStringLiteral("autoPauseNoiseSuppression")] = audio_.autoPauseNoiseSuppression;
     root[QStringLiteral("audio")] = audio;
 
     QJsonObject diagnostics;

@@ -75,6 +75,13 @@ public:
     void setEnabled(bool on);
     bool enabled() const;
 
+    // A second, automatic bypass underneath the user's switch: set while
+    // nothing downstream can hear this filter's output, so the model stops
+    // burning CPU on audio that goes nowhere. enabled() keeps reporting the
+    // user's choice; the filter denoises only while enabled and not idle.
+    void setIdle(bool idle);
+    bool idle() const;
+
     // On or off, and nothing in between. There used to be a strength that
     // blended the denoised signal back with the original, but the denoised
     // signal comes out a frame or more behind its input -- more for

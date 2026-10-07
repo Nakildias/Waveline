@@ -321,11 +321,6 @@ target_link_libraries(waveline-mixer PRIVATE
 # Monarchy ships it; nothing else needs it, so it is never a hard dependency.
 find_package(KF6WindowSystem QUIET)
 if(KF6WindowSystem_FOUND)
-    target_sources(waveline-mixer PRIVATE
-        # Breeze's shadow renderer, the same one the desktop's decoration
-        # draws its shadow with (GPL-2.0-or-later, KDE).
-        src/ui/monarchy/boxshadowrenderer.cpp
-        src/ui/monarchy/boxshadowrenderer.h)
     target_compile_definitions(waveline-mixer PRIVATE WAVELINE_HAVE_KWINDOWSYSTEM=1)
     target_link_libraries(waveline-mixer PRIVATE KF6::WindowSystem)
 endif()
@@ -341,6 +336,17 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    find_program(DBUS_RUN_SESSION dbus-run-session)
+    if(DBUS_RUN_SESSION)
+        qt_add_executable(waveline-idle-client-test
+            tests/idle_client_test.cpp src/ui/mixerclient.cpp src/ui/mixerclient.h)
+        target_include_directories(waveline-idle-client-test PRIVATE src)
+        target_link_libraries(waveline-idle-client-test PRIVATE wavelineprofile Qt6::Core Qt6::DBus)
+        add_test(NAME idle-client COMMAND "${DBUS_RUN_SESSION}" --
+            $<TARGET_FILE:waveline-idle-client-test>)
+        set_tests_properties(idle-client PROPERTIES TIMEOUT 30)
+    endif()
+
     add_executable(waveline-audio-recovery-test tests/audio_recovery_test.cpp)
     target_include_directories(waveline-audio-recovery-test PRIVATE src)
     target_link_libraries(waveline-audio-recovery-test PRIVATE Qt6::Core)

@@ -3,6 +3,34 @@
 Run `cmake -S app -B /tmp/waveline-build`, build, then run
 `ctest --test-dir /tmp/waveline-build --output-on-failure`.
 
+`idle-client` uses a fake mixer on a private D-Bus session. It checks that an
+untouched GUI client avoids full-state refreshes at 400 ms while keeping its
+16 ms meter polling, responds promptly to daemon notifications, refreshes
+immediately on restore, and keeps polling disabled across a hidden reconnect.
+It also verifies the five-second fallback for missed notifications. This test
+requires `dbus-run-session` and permission to create local sockets.
+
+Idle optimization changes the full-state fallback from 2.5 Hz to 0.2 Hz (92%
+fewer periodic full refreshes), coalesces change notifications, and resolves
+channel effects meter routing on control changes instead of every meter tick
+(removing 125–187.5 routing calls/second per visible channel effects window).
+The daemon now coalesces external node additions, removals, and property
+updates into `Changed` notifications so app lists and device pickers do not
+depend on the fallback poll for launch/hotplug updates.
+Audio DSP, graph scheduling, buffer sizes, and meter sampling are unchanged.
+These are work-count reductions, not a measured whole-application CPU claim.
+Changes delivered by `Changed` remain immediate; state without a notification
+can take up to five seconds to reconcile.
+
+For a desktop CPU comparison, use the same profile, connected hardware,
+effects, graph quantum, display refresh rate, and window layout in both builds.
+After startup recovery settles, sample `waveline-mixer` and `wavelined` CPU
+separately for at least 30 seconds with the main window visible, with channel
+effects open, and with the mixer hidden. Keep live microphone processing
+enabled in both builds. Verify faders, hardware mute, playback start/stop,
+device hotplug, and window restore while listening; lower GUI polling work
+does not establish an audio-quality or whole-process CPU result by itself.
+
 The tests cover overlapping recovery requests while inputs are disconnected,
 a request arriving between individual rebuilds, duplicate requests, and a new
 manual rebuild after completion. The sample-continuity test exercises fixed

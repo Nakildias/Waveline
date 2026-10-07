@@ -98,38 +98,13 @@ int gridUnit() {
     return w > 0 ? w : 10;
 }
 
+// [Buttons] Size, as TitleBar's buttonSize() maps it to grid units.
 qreal buttonSizeFactor(const QString &name) {
-    if (name == QLatin1String("ButtonTiny")) return 1.0;
-    if (name == QLatin1String("ButtonSmall")) return 1.5;
-    if (name == QLatin1String("ButtonLarge")) return 2.5;
-    if (name == QLatin1String("ButtonVeryLarge")) return 3.5;
-    return 2.0;
-}
-
-Settings::ButtonStyle buttonStyleFor(const QString &name) {
-    using S = Settings::ButtonStyle;
-    static const QHash<QString, S> byName = {
-        {QStringLiteral("plasma"), S::Plasma},
-        {QStringLiteral("gnome"), S::Gnome},
-        {QStringLiteral("macSierra"), S::MacSierra},
-        {QStringLiteral("macDarkAurorae"), S::MacDarkAurorae},
-        {QStringLiteral("sbeSierra"), S::SbeSierra},
-        {QStringLiteral("sbeSierraActive"), S::SbeSierraActive},
-        {QStringLiteral("sbeSierraInactive"), S::SbeSierraInactive},
-        {QStringLiteral("sbeDarkAurorae"), S::SbeDarkAurorae},
-        {QStringLiteral("sbeDarkAuroraeActive"), S::SbeDarkAuroraeActive},
-        {QStringLiteral("sbeDarkAuroraeInactive"), S::SbeDarkAuroraeInactive},
-        {QStringLiteral("sierraColorSymbols"), S::SierraColorSymbols},
-        {QStringLiteral("darkAuroraeColorSymbols"), S::DarkAuroraeColorSymbols},
-        {QStringLiteral("sierraMonochromeSymbols"), S::SierraMonochromeSymbols},
-        {QStringLiteral("darkAuroraeMonochromeSymbols"), S::DarkAuroraeMonochromeSymbols},
-    };
-    // KConfig writes an enum by name; a hand-edited file may hold the index.
-    bool numeric = false;
-    const int index = name.toInt(&numeric);
-    if (numeric && index >= 0 && index <= int(S::DarkAuroraeMonochromeSymbols))
-        return S(index);
-    return byName.value(name, S::MacDarkAurorae);
+    if (name == QLatin1String("tiny")) return 1.0;
+    if (name == QLatin1String("small")) return 1.5;
+    if (name == QLatin1String("large")) return 2.5;
+    if (name == QLatin1String("huge")) return 3.5;
+    return 2.0;  // normal, and anything unrecognised.
 }
 
 bool readBool(const QSettings &c, const QString &key, bool fallback) {
@@ -139,16 +114,17 @@ bool readBool(const QSettings &c, const QString &key, bool fallback) {
     return fallback;
 }
 
-int readShadowSize(const QSettings &c) {
+// [Shadow] <prefix>Size, written by name; a hand-edited file may hold the
+// step's number. Large when missing, as in Monarchy.
+int readShadowSize(const QSettings &c, const QString &key) {
     static const QStringList names = {
-        QStringLiteral("ShadowNone"), QStringLiteral("ShadowSmall"),
-        QStringLiteral("ShadowMedium"), QStringLiteral("ShadowLarge"),
-        QStringLiteral("ShadowVeryLarge")};
-    const QString name = c.value(QStringLiteral("ShadowSize")).toString().trimmed();
+        QStringLiteral("none"), QStringLiteral("small"), QStringLiteral("medium"),
+        QStringLiteral("large"), QStringLiteral("huge")};
+    const QString text = c.value(key).toString().trimmed().toLower();
     bool numeric = false;
-    const int index = name.toInt(&numeric);
-    if (numeric) return (index >= 0 && index < 5) ? index : 3;
-    const int found = names.indexOf(name);
+    const int step = text.toInt(&numeric);
+    if (numeric) return (step >= 0 && step < 5) ? step : 3;
+    const int found = names.indexOf(text);
     return found >= 0 ? found : 3;
 }
 
@@ -342,23 +318,34 @@ void Settings::watch() {
 void Settings::read() {
     QSettings c(titlebarPath(), QSettings::IniFormat);
 
-    c.beginGroup(QStringLiteral("Windeco"));
-    buttonSize_ = qRound(buttonSizeFactor(c.value(QStringLiteral("ButtonSize")).toString())
+    // The buttons are [Buttons], as Monarchy's titlebar_button_settings.cc
+    // reads them. They used to be [Windeco] ButtonSize/ButtonStyle/...; those
+    // keys are no longer written, and a stale copy of them must not win.
+    c.beginGroup(QStringLiteral("Buttons"));
+    buttonSize_ = qRound(buttonSizeFactor(c.value(QStringLiteral("Size")).toString())
                          * gridUnit());
-    buttonSpacing_ = qRound(0.5 * smallSpacing() * c.value(QStringLiteral("ButtonSpacing"), 2).toInt());
-    buttonPadding_ = qRound(0.5 * smallSpacing() * c.value(QStringLiteral("ButtonPadding"), 4).toInt());
-    animationsEnabled_ = readBool(c, QStringLiteral("AnimationsEnabled"), true);
-    animationsDuration_ = c.value(QStringLiteral("AnimationsDuration"), 150).toInt();
-    buttonStyle_ = buttonStyleFor(c.value(QStringLiteral("ButtonStyle")).toString());
-    cornerRadius_ = c.value(QStringLiteral("CornerRadius"), 0).toString().toInt();
+    buttonSpacing_ = qRound(0.5 * smallSpacing() * c.value(QStringLiteral("Gap"), 2).toInt());
+    buttonPadding_ = qRound(0.5 * smallSpacing() * c.value(QStringLiteral("Margin"), 4).toInt());
+    flatButtons_ = c.value(QStringLiteral("Style")).toString() == QLatin1String("flat");
+    zoomOnHover_ = readBool(c, QStringLiteral("ZoomOnHover"), false);
+    inactiveState_ = readBool(c, QStringLiteral("InactiveState"), false);
     c.endGroup();
 
-    c.beginGroup(QStringLiteral("Common"));
-    shadowSize_ = readShadowSize(c);
-    bool ok = false;
-    const int strength = c.value(QStringLiteral("ShadowStrength")).toString().toInt(&ok);
-    shadowStrength_ = ok ? std::clamp(strength, 25, 255) : 255;
-    shadowColor_ = readColour(c, QStringLiteral("ShadowColor"));
+    // The shadow is [Shadow], as Monarchy's window_shadow_settings.cc reads
+    // it. [Common] ShadowSize/ShadowStrength/ShadowColor are no longer written.
+    c.beginGroup(QStringLiteral("Shadow"));
+    const auto readStyle = [&c](const QString &prefix) {
+        ShadowStyle style;
+        style.size = readShadowSize(c, prefix + QStringLiteral("Size"));
+        bool ok = false;
+        const int strength = c.value(prefix + QStringLiteral("Strength")).toString().toInt(&ok);
+        style.strength = ok ? std::clamp(strength, 25, 255) : 255;
+        style.colour = readColour(c, prefix + QStringLiteral("Colour"));
+        return style;
+    };
+    activeShadow_ = readStyle(QString());
+    separateInactiveShadow_ = readBool(c, QStringLiteral("SeparateInactive"), false);
+    inactiveShadow_ = readStyle(QStringLiteral("Inactive"));
     c.endGroup();
 
     const QJsonObject appearance = readAppearance();
@@ -368,11 +355,15 @@ void Settings::read() {
     QSettings kwin(kwinrcPath(), QSettings::IniFormat);
     kwinCornerRadius_ = std::max(0, kwin.value(QStringLiteral("Round-Corners/Size"), 14).toInt());
 
-    signature_ = QStringLiteral("%1/%2/%3/%4/%5/%6/%7/%8/%9/%10/%11")
+    signature_ = QStringLiteral("%1/%2/%3/%4/%5/%6/%7/%8/%9")
                      .arg(buttonSize_).arg(buttonSpacing_).arg(buttonPadding_)
-                     .arg(animationsEnabled_).arg(animationsDuration_)
-                     .arg(int(buttonStyle_)).arg(cornerRadius_).arg(shadowSize_)
-                     .arg(shadowStrength_).arg(shadowColor_.name(QColor::HexArgb))
+                     .arg(flatButtons_).arg(zoomOnHover_)
+                     .arg(inactiveState_).arg(separateInactiveShadow_)
+                     .arg(QStringLiteral("%1,%2,%3;%4,%5,%6")
+                              .arg(activeShadow_.size).arg(activeShadow_.strength)
+                              .arg(activeShadow_.colour.name(QColor::HexArgb))
+                              .arg(inactiveShadow_.size).arg(inactiveShadow_.strength)
+                              .arg(inactiveShadow_.colour.name(QColor::HexArgb)))
                      .arg(opacityPercent_)
                  + accentColour().name() + (isLight() ? QStringLiteral("/light") : QString())
                  + QStringLiteral("/%1/%2/%3/%4/%5/%6/%7/%8")

@@ -299,6 +299,15 @@ public slots:
     bool DspProfiling() const;
     void SetDspProfiling(bool on);
 
+    // Pause microphone noise suppression while nothing can hear it -- no
+    // application recording any Waveline device, no software monitor of a
+    // processed microphone, no ducking keyed from one. Machine policy, on by
+    // default, applied live. The NC switches keep showing the user's choice;
+    // NoiseSuppressionPaused() is whether the pause is in effect right now.
+    bool AutoPauseNoiseSuppression() const;
+    void SetAutoPauseNoiseSuppression(bool on);
+    bool NoiseSuppressionPaused() const;
+
     // Human-readable lines for the diagnostics view: "key\tvalue\tdetail".
     //
     // This exists because the entire latency investigation behind it was a
@@ -346,6 +355,11 @@ public slots:
     void SetMasterMicEffectsEnabled(const QString &masterId, bool on);
     bool MasterMicMonitorFx(const QString &masterId) const;
     void SetMasterMicMonitorFx(const QString &masterId, bool on);
+    int MasterCaptureMode(const QString &masterId) const;
+    void SetMasterCaptureMode(const QString &masterId, int mode);
+    int MasterCaptureChannels(const QString &masterId) const;
+    QStringList MasterMonitorChannels(const QString &masterId) const;
+    void SetMasterMonitorChannel(const QString &masterId, int channel, double volume, bool muted);
     bool MasterMicStereo(const QString &masterId) const;
     void SetMasterMicStereo(const QString &masterId, bool on);
     double MasterMicInputVolume(const QString &masterId) const;
@@ -1157,10 +1171,25 @@ private:
     // milliseconds -- and a signal per node would make a shell rebuild its
     // panel five times for one event.
     QTimer micConsumerTimer_;
+    QTimer nodeChangedTimer_;
     void scheduleMicConsumerSignal();
     // Last set of node ids reported by MicrophoneConsumers(), so the debounce
     // stays quiet when a burst nets out to no change at all.
     QSet<uint> lastMicConsumers_;
+    // Auto-pause of microphone noise suppression. Graph events are coalesced
+    // by ncIdleTimer_; pausing then waits out ncPauseTimer_ so a stream that
+    // restarts does not flap the filters, while resuming is immediate.
+    QTimer ncIdleTimer_;
+    QTimer ncPauseTimer_;
+    void scheduleNcIdleCheck();
+    void updateNcIdle();
+    void setMicNoisePaused(bool paused);
+    // Whether anything downstream can hear a processed microphone.
+    bool processedMicHasListener() const;
+    // Whether this one recording stream, someone else's, could be hearing
+    // Waveline's processed microphone. A tap on an application's own playback
+    // -- a music player's visualiser -- cannot, however it looks otherwise.
+    bool captureMayHearProcessedMic(const waveline::PwNode &n) const;
     // Watches for a desktop shell on the bus. Held so ShellClientPresent() has
     // an answer without a blocking round trip on every call.
     std::unique_ptr<QDBusServiceWatcher> shellWatcher_;

@@ -58,6 +58,15 @@ struct NoiseFilter::Impl {
 
 
     std::atomic<bool> enabled{true};
+    std::atomic<bool> idle{false};
+
+    bool processing() const {
+        return enabled.load(std::memory_order_relaxed) &&
+               !idle.load(std::memory_order_relaxed);
+    }
+    void updateLatency() {
+        meter.setLatencyFrames(processing() ? static_cast<uint32_t>(frame) : 0);
+    }
     std::atomic<float> speechProb{0.0f};
     std::atomic<float> inRms{0.0f};
     std::atomic<float> outRms{0.0f};
@@ -70,7 +79,7 @@ void onProcess(void *userdata, spa_io_position *position) {
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
     std::unique_lock<std::mutex> lk(d->engineLock, std::try_to_lock);
-    const bool process = lk.owns_lock() && d->enabled.load(std::memory_order_relaxed);
+    const bool process = lk.owns_lock() && d->processing();
     double inputEnergy = 0, outputEnergy = 0;
     float speech = 0;
     for (int ch = 0; ch < d->channels; ++ch) {
@@ -150,8 +159,7 @@ bool NoiseFilter::setEngine(NoiseEngine engine, std::string &error) {
     // The delay this stage adds moved with the engine, so what the diagnostics
     // panel quotes has to move with it too -- unless it is switched off, in
     // which case it is bypassing and adding nothing whatever engine is loaded.
-    if (d_->enabled.load(std::memory_order_relaxed))
-        d_->meter.setLatencyFrames(static_cast<uint32_t>(frame));
+    d_->updateLatency();
     return true;
 }
 
@@ -163,10 +171,18 @@ void NoiseFilter::setEnabled(bool on) {
     // ever had a noise filter built for it -- which is all of them -- and none
     // of those channels is paying it. What the panel quotes has to be what the
     // audio is actually going through, not what this stage could cost.
-    d_->meter.setLatencyFrames(on ? static_cast<uint32_t>(d_->frame) : 0);
+    d_->updateLatency();
 }
 bool NoiseFilter::enabled() const {
     return d_->enabled.load(std::memory_order_relaxed);
+}
+
+void NoiseFilter::setIdle(bool idle) {
+    d_->idle.store(idle, std::memory_order_relaxed);
+    d_->updateLatency();
+}
+bool NoiseFilter::idle() const {
+    return d_->idle.load(std::memory_order_relaxed);
 }
 
 float NoiseFilter::speechProbability() const {
