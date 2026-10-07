@@ -22,8 +22,10 @@ struct CaptureSelector::Impl {
     pw_filter *filter = nullptr;
     spa_hook listener{};
     DspMeter meter;
-    std::array<void *, kMaxInputs> inputs{};
-    void *output = nullptr;
+    std::array<std::array<void *, 2>, kMaxInputs> inputs{};
+    int channels = 1;
+    std::atomic<int> mode{0};
+    void *outputs[2]{};
     std::atomic<std::size_t> selected{0};
     uint64_t instance = 0;
     std::atomic<uint64_t> xruns{0}, cycles{0};
@@ -37,8 +39,6 @@ void onProcess(void *userdata, spa_io_position *position) {
     auto *d = static_cast<CaptureSelector::Impl *>(userdata);
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
-    auto *out = static_cast<float *>(pw_filter_get_dsp_buffer(d->output, n));
-    if (!out) return;
 
     const std::size_t selected = d->selected.load(std::memory_order_relaxed);
     if (selected < d->inputs.size()) {
@@ -54,15 +54,24 @@ void onProcess(void *userdata, spa_io_position *position) {
     } else {
         d->previousDriver = SPA_ID_INVALID;
     }
-    auto *in = selected < d->inputs.size()
-                   ? static_cast<float *>(
-                         pw_filter_get_dsp_buffer(d->inputs[selected], n))
-                   : nullptr;
-    if (!in) {
-        std::memset(out, 0, n * sizeof(float));
-        return;
+    const float *in[2]{};
+    float *out[2]{};
+    for (int ch = 0; ch < d->channels; ++ch) {
+        out[ch] = static_cast<float *>(pw_filter_get_dsp_buffer(d->outputs[ch], n));
+        if (selected < d->inputs.size())
+            in[ch] = static_cast<float *>(pw_filter_get_dsp_buffer(d->inputs[selected][ch], n));
     }
-    if (out != in) std::memcpy(out, in, n * sizeof(float));
+    const int mode = d->channels == 2 ? d->mode.load(std::memory_order_relaxed) : 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        // Read both before writing: PipeWire may alias an input and output.
+        float left = in[0] ? in[0][i] : 0.0f;
+        float right = in[1] ? in[1][i] : 0.0f;
+        if (mode == 1) right = left;
+        else if (mode == 2) left = right;
+        else if (mode == 3) left = right = 0.5f * (left + right);
+        if (out[0]) out[0][i] = left;
+        if (out[1]) out[1][i] = right;
+    }
 }
 
 #pragma GCC diagnostic push
@@ -86,13 +95,17 @@ CaptureSelector::Health CaptureSelector::health() const {
             d_->cycles.load(std::memory_order_relaxed)};
 }
 
-std::string CaptureSelector::inputPort(std::size_t index) {
-    return "input_" + std::to_string(index);
+std::string CaptureSelector::inputPort(std::size_t index, int channel) {
+    return "input_" + std::to_string(index) + (channel ? "_FR" : "");
 }
 
 void CaptureSelector::select(std::size_t index) {
     if (index < kMaxInputs)
         d_->selected.store(index, std::memory_order_release);
+}
+
+void CaptureSelector::setMode(int mode) {
+    d_->mode.store(mode >= 0 && mode <= 3 ? mode : 0, std::memory_order_relaxed);
 }
 
 void CaptureSelector::selectSilence() {
@@ -101,7 +114,9 @@ void CaptureSelector::selectSilence() {
 
 bool CaptureSelector::start(const std::string &nodeName,
                             const std::string &description,
-                            std::string &error) {
+                            std::string &error, int channels) {
+    if (channels != 1 && channels != 2) { error = "invalid capture width"; return false; }
+    d_->channels = channels;
     d_->meter.attach(nodeName, "Capture");
 
     // The shared DSP connection, not one of this filter's own. See filterhost.h.
@@ -122,8 +137,8 @@ bool CaptureSelector::start(const std::string &nodeName,
         PW_KEY_NODE_DESCRIPTION, description.c_str(),
         PW_KEY_NODE_AUTOCONNECT, "false",
         "audio.rate", "48000",
-        "audio.channels", "1",
-        "audio.position", "[ MONO ]",
+        "audio.channels", channels == 2 ? "2" : "1",
+        "audio.position", channels == 2 ? "[ FL FR ]" : "[ MONO ]",
         "node.want-driver", "true",
         nullptr);
 
@@ -137,27 +152,32 @@ bool CaptureSelector::start(const std::string &nodeName,
     }
 
     for (std::size_t i = 0; i < kMaxInputs; ++i) {
-        const std::string port = inputPort(i);
-        d_->inputs[i] = pw_filter_add_port(
+      for (int ch = 0; ch < channels; ++ch) {
+        const std::string port = inputPort(i, ch);
+        d_->inputs[i][ch] = pw_filter_add_port(
             d_->filter, PW_DIRECTION_INPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0,
             pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
                               PW_KEY_PORT_NAME, port.c_str(), nullptr),
             nullptr, 0);
-        if (!d_->inputs[i]) {
+        if (!d_->inputs[i][ch]) {
             error = "pw_filter_add_port failed";
             pw_thread_loop_unlock(d_->loop);
             return false;
         }
     }
-    d_->output = pw_filter_add_port(
+    }
+    for (int ch = 0; ch < channels; ++ch) {
+    d_->outputs[ch] = pw_filter_add_port(
         d_->filter, PW_DIRECTION_OUTPUT, PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0,
         pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-                          PW_KEY_PORT_NAME, "output", nullptr),
+                          PW_KEY_PORT_NAME, channels == 1 ? "output" : (ch ? "output_FR" : "output_FL"), nullptr),
         nullptr, 0);
-    if (!d_->output) {
+    if (!d_->outputs[ch]) {
         error = "pw_filter_add_port failed";
         pw_thread_loop_unlock(d_->loop);
         return false;
+    }
+
     }
 
     if (pw_filter_connect(d_->filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) < 0) {

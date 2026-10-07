@@ -34,7 +34,7 @@ struct Signal {
         const auto n = position->clock.duration;
         const int lane = s.lane.load();
         for (int ch = 0; ch < 2; ++ch) {
-            auto *buffer = static_cast<float *>(pw_filter_get_dsp_buffer(s.ports[ch], n));
+            auto *buffer = s.ports[ch] ? static_cast<float *>(pw_filter_get_dsp_buffer(s.ports[ch], n)) : nullptr;
             float sum = 0;
             for (uint32_t i = 0; buffer && i < n; ++i) {
                 if (s.source)
@@ -49,7 +49,7 @@ struct Signal {
         s.cycles.fetch_add(1);
     }
 
-    Signal(const char *name, bool produce, bool capture = false) : source(produce) {
+    Signal(const char *name, bool produce, bool capture = false, int channels = 2) : source(produce) {
         std::string error;
         require(FilterHost::start(error), error);
         auto *loop = FilterHost::loop();
@@ -64,9 +64,9 @@ struct Signal {
             pw_filter_events e{}; e.version = PW_VERSION_FILTER_EVENTS; e.process = process; return e;
         }();
         pw_filter_add_listener(filter, &listener, &events, this);
-        for (int ch = 0; ch < 2; ++ch) {
+        for (int ch = 0; ch < channels; ++ch) {
             const char *port = source ? (ch ? "output_FR" : "output_FL") : (ch ? "input_FR" : "input_FL");
-            if (capture) port = ch ? "capture_FR" : "capture_FL";
+            if (capture) port = channels == 1 ? "capture_MONO" : (ch ? "capture_FR" : "capture_FL");
             ports[ch] = pw_filter_add_port(filter, source ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
                 PW_FILTER_PORT_FLAG_MAP_BUFFERS, 0,
                 pw_properties_new("format.dsp", "32 bit float mono audio", "port.name", port, nullptr), nullptr, 0);
@@ -88,8 +88,8 @@ int main() {
         PwEngine engine;
         std::string error;
         require(engine.start(error), error);
-        Signal source("alsa_input.issue9-default-mic", true, true);
-        require(engine.waitForPort("alsa_input.issue9-default-mic", "capture_FL", true, 5000),
+        Signal source("alsa_input.issue9-default-mic", true, true, 1);
+        require(engine.waitForPort("alsa_input.issue9-default-mic", "capture_MONO", true, 5000),
                 "default capture source missing");
         MixerGraph graph(engine);
         require(graph.build(error, false), error);
@@ -177,6 +177,133 @@ int main() {
         graph.setChannelMonitorFx("system", true);
         require(graph.rewireChannelMonitor("system", error), error);
         check(0); check(1);
+    }
+    {
+        PwEngine engine;
+        std::string error;
+        require(engine.start(error), error);
+        Signal source("alsa_input.test-stereo-mic", true, true);
+        require(engine.waitForPort("alsa_input.test-stereo-mic", "capture_FR", true, 5000), "stereo hardware missing");
+        MixerGraph graph(engine);
+        graph.setMicNodeMatch("alsa_input.test-stereo-mic");
+        graph.setSoftwareMicGain(true);
+        require(graph.build(error, true), error);
+        auto *bus = graph.masterBus("mic");
+        require(bus && bus->captureChannels == 2, "stereo hardware must build stereo DSP");
+        require(graph.noiseFilter(), "stereo denoiser missing");
+        graph.noiseFilter()->setEnabled(false);
+        graph.setSoftwareMonitor(true);
+        require(graph.wireMasterPaths("mic", error), error);
+        require(graph.verifyMasterMixWiring("mic", error), error);
+        Signal recording("test-mic-recording", false), monitor("test-mic-monitor", false),
+               stream("test-mic-stream", false), channel("test-channel-recording", false);
+        auto link = [&](const std::string &from, const std::string &out, const std::string &to, const std::string &in) {
+            require(engine.waitForPort(from, out, true, 5000), "missing " + from + ':' + out);
+            require(engine.waitForPort(to, in, false, 5000), "missing " + to + ':' + in);
+            require(engine.linkPorts(from, out, to, in, error), error);
+        };
+        for (const std::string side : {"FL", "FR"}) {
+            link("waveline-mic", "capture_" + side, "test-mic-recording", "input_" + side);
+            link(MixerGraph::kMonitorMix, "monitor_" + side, "test-mic-monitor", "input_" + side);
+            link(MixerGraph::kStreamMix, "monitor_" + side, "test-mic-stream", "input_" + side);
+        }
+        auto check = [&](Signal &tap, int lane, const std::string &label, float minimum = 0.001f) {
+            const auto cycles = tap.cycles.load();
+            std::this_thread::sleep_for(150ms);
+            require(tap.cycles.load() > cycles, label + " stalled");
+            for (int ch = 0; ch < 2; ++ch) {
+                const float e = tap.energy[ch].load();
+                const bool active = lane == ch || lane == 2;
+                require(std::isfinite(e) && (active ? e > minimum : e < 1e-8f),
+                        label + " lane " + std::to_string(ch) + " energy " + std::to_string(e));
+            }
+        };
+        for (bool effects : {false, true}) {
+            graph.setMicMonitorFx(effects);
+            require(graph.rewireMicMonitor(error), error);
+            for (int lane : {0, 1, 2}) {
+                source.lane.store(lane);
+                std::this_thread::sleep_for(400ms);
+                check(recording, lane, "published stereo microphone");
+                check(monitor, lane, "stereo monitoring");
+                check(stream, lane, "stereo Stream mix");
+            }
+        }
+        // Left/right monitoring controls must not mute or attenuate recordings.
+        source.lane.store(2);
+        bus->monitorLeft = 0;
+        graph.applyMasterPathLevels("mic");
+        std::this_thread::sleep_for(400ms);
+        check(monitor, 1, "left monitor muted");
+        check(recording, 2, "recording unaffected by monitor mute");
+        check(stream, 2, "stream unaffected by monitor mute");
+        bus->monitorLeft = 1; bus->monitorRight = 0;
+        graph.applyMasterPathLevels("mic");
+        std::this_thread::sleep_for(400ms);
+        check(monitor, 0, "right monitor muted");
+        bus->monitorRight = 1;
+        graph.applyMasterPathLevels("mic");
+
+        graph.setChannelMicSource("system", true);
+        graph.ensureChannelMicSource("system");
+        require(graph.rewireChannelMicSource("system", error), error);
+        for (const std::string side : {"FL", "FR"})
+            link("waveline-system-mic", "capture_" + side, "test-channel-recording", "input_" + side);
+        for (bool deviceFx : {false, true}) {
+            graph.setChannelMicUseDeviceFx("system", deviceFx);
+            require(graph.rewireChannelMicSource("system", error), error);
+            for (const std::string side : {"FL", "FR"})
+                link("waveline-system-mic", "capture_" + side, "test-channel-recording", "input_" + side);
+            for (int lane : {0, 1}) {
+                source.lane.store(lane);
+                std::this_thread::sleep_for(400ms);
+                check(channel, lane, "per-channel stereo microphone");
+            }
+        }
+        // The exact routing helper used by Audio Sharing and the soundboard.
+        Signal shared("test-shared-audio", true);
+        source.lane.store(3); // silence
+        require(engine.waitForPort("test-shared-audio", "output_FR", true, 5000), "sharing source missing");
+        require(engine.linkToVirtualSource("test-shared-audio", "output_FL", "output_FR", "waveline-mic", error), error);
+        for (int lane : {0, 1}) {
+            shared.lane.store(lane);
+            std::this_thread::sleep_for(400ms);
+            check(recording, lane, "audio sharing into stereo microphone");
+        }
+        engine.forgetLinksForNode("test-shared-audio");
+        // Independent models: activity on one side must never appear on the other.
+        graph.noiseFilter()->setEnabled(true);
+        for (int lane : {0, 1}) {
+            source.lane.store(lane);
+            std::this_thread::sleep_for(1200ms);
+            check(recording, lane, "stereo noise suppression", 1e-12f);
+        }
+        // Auto-pause: the filter goes to passthrough without touching the
+        // user's switch, and resumes denoising when woken.
+        source.lane.store(2);
+        graph.setMicNoiseIdle(true);
+        std::this_thread::sleep_for(400ms);
+        {
+            auto *nc = graph.noiseFilter();
+            require(nc->enabled() && nc->idle(), "pause leaves the NC switch on");
+            const float in = nc->inputRms(), out = nc->outputRms();
+            require(in > 0.01f && std::fabs(out - in) < in * 0.01f, "paused NC passes audio through");
+            require(nc->speechProbability() == 0.0f, "paused NC runs no model");
+        }
+        graph.setMicNoiseIdle(false);
+        std::this_thread::sleep_for(1200ms);
+        require(graph.noiseFilter()->speechProbability() > 0.0f, "resumed NC runs the model again");
+        graph.noiseFilter()->setEnabled(false);
+        graph.setMicNoiseIdle(true);
+        require(graph.rebuildMasterHwCapture("mic", error), error);
+        require(bus->captureChannels == 2 && !graph.noiseFilter()->enabled(), "rebuild preserves stereo and bypass");
+        require(graph.noiseFilter()->idle(), "rebuilt NC inherits the pause");
+        graph.setMicNoiseIdle(false);
+        for (const std::string side : {"FL", "FR"})
+            link("waveline-mic", "capture_" + side, "test-mic-recording", "input_" + side);
+        source.lane.store(1);
+        std::this_thread::sleep_for(400ms);
+        check(recording, 1, "stereo after capture rebuild");
     }
     FilterHost::stop();
     std::cout << "Production graph preserves left/right through both mixes and FX toggles\n";

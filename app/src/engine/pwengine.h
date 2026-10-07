@@ -41,6 +41,13 @@ struct PwNode {
     uint32_t processId = 0;   // application.process.id
     std::string processBinary; // application.process.binary
     uint32_t clientId = 0;    // client.id, for streams that inherit process.* from Client
+    std::string objectSerial; // object.serial, what target.object usually names
+    // For a recording stream: what it asked to record (target.object, a serial
+    // or a node name) and whether it asked for a sink's monitor
+    // (stream.capture.sink). Neither is in the registry announce; both arrive
+    // with the bound node's info, before the stream is reported as added.
+    std::string captureTarget;
+    bool capturesSink = false;
     bool isOurs = false;      // created by this engine
     // Live scheduling state, filled in for our own nodes once bound. See
     // PwEngine::nodeStalled(). The "not told yet" sentinel cannot be -1:
@@ -109,6 +116,12 @@ public:
     bool addVirtualSource(const std::string &name, const std::string &description,
                           int channels, std::string &error);
 
+    // Feed a published recording device at its actual width. A stereo target
+    // keeps the lanes separate; a mono target retains the existing summed mix.
+    bool linkToVirtualSource(const std::string &source, const std::string &left,
+                             const std::string &right, const std::string &target,
+                             std::string &error);
+
     // Destroys a node created by addNullSink/addVirtualSource.
     bool removeNode(const std::string &name);
 
@@ -171,6 +184,7 @@ public:
                  int channels, bool sourceIsSink, std::string &error);
 
     // 0.0 .. 1.0+, applied to the loopback created by addPath.
+    bool setPathChannelGains(const std::string &handle, float left, float right);
     bool setPathVolume(const std::string &handle, float volume);
     bool setPathMuted(const std::string &handle, bool muted);
     // Both in one write. The Props object carries mute and channelVolumes
@@ -352,6 +366,9 @@ public:
 
     void setOnNodeAdded(std::function<void(const PwNode &)> cb);
     void setOnNodeRemoved(std::function<void(const PwNode &)> cb);
+    // A link appeared or went away anywhere in the graph. Runs on the
+    // PipeWire thread loop and fires in bursts; handlers should defer.
+    void setOnLinksChanged(std::function<void()> cb);
 
     // The session manager was replaced -- WirePlumber restarted. Its "default"
     // metadata is where every stream routing decision is written, and it is
@@ -392,6 +409,17 @@ public:
     // False when the stream is linked to nothing -- the ordinary state for the
     // moment after it appears, and for as long as it is idle.
     bool streamSourceNode(uint32_t streamNodeId, PwNode &out) const;
+
+    // streamSourceNode(), falling back to the node the stream's target.object
+    // names when it is linked to nothing. An idle passive tap -- a music
+    // player's visualiser reading its own paused playback -- has no links at
+    // all, and only its target still says it was never a microphone.
+    bool captureFeedNode(const PwNode &stream, PwNode &out) const;
+
+    // A feed that is somebody's playback rather than a microphone: a sink, so
+    // its monitor, or an application's own output stream, which is what a
+    // visualiser or a recorder taking one app's sound reads.
+    static bool isPlaybackFeed(const PwNode &feed);
 
     // Public only so the C registry callbacks can name it; not part of the API.
     struct Impl;

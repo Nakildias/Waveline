@@ -114,6 +114,27 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
         emit MicrophoneConsumersChanged();
     });
 
+    // Microphone NC auto-pause. Link and node events arrive in bursts while
+    // the graph is built or an application starts; evaluate once they settle.
+    ncIdleTimer_.setSingleShot(true);
+    ncIdleTimer_.setInterval(100);
+    connect(&ncIdleTimer_, &QTimer::timeout, this, [this] { updateNcIdle(); });
+    ncPauseTimer_.setSingleShot(true);
+    ncPauseTimer_.setInterval(3000);
+    connect(&ncPauseTimer_, &QTimer::timeout, this, [this] {
+        if (config_.audio().autoPauseNoiseSuppression && !processedMicHasListener())
+            setMicNoisePaused(true);
+    });
+    // Monitor, ducking and published-mic settings all land as Changed().
+    connect(this, &MixerService::Changed, this, &MixerService::scheduleNcIdleCheck);
+
+    // App lists and device pickers must update without a fast full-state GUI
+    // poll. Registry/property events arrive in bursts; publish once after the
+    // first 100 ms, without indefinitely postponing updates during a flood.
+    nodeChangedTimer_.setSingleShot(true);
+    nodeChangedTimer_.setInterval(100);
+    connect(&nodeChangedTimer_, &QTimer::timeout, this, &MixerService::Changed);
+
     // Which desktop shell is on the bus changes nothing about how the mixer
     // behaves; it is reported so a client can say so, and so a shell that
     // starts after the daemon is noticed without either side polling.
@@ -999,6 +1020,10 @@ void MixerService::applyMasterMixLevels(const QString &masterId) {
     const MasterBusState *m = masterBusState(p, masterId);
     if (!m) return;
     const std::string id = masterId.toStdString();
+    if (auto *bus = graph_->masterBus(id)) {
+        bus->monitorLeft = m->monitorLeftMuted ? 0.0f : float(m->monitorLeft);
+        bus->monitorRight = m->monitorRightMuted ? 0.0f : float(m->monitorRight);
+    }
 
     if (masterId == QLatin1String("mic")) {
         micStreamLevel_ = m->mix.streamVolume;
@@ -1122,6 +1147,10 @@ void MixerService::applyMasterBuses() {
         }
 
         if (waveline::MasterBusRuntime *rt = graph_->masterBus(id)) {
+            rt->captureMode = m.captureMode;
+            if (rt->chain.selector) rt->chain.selector->setMode(m.captureMode);
+            rt->monitorLeft = m.monitorLeftMuted ? 0.0f : float(m.monitorLeft);
+            rt->monitorRight = m.monitorRightMuted ? 0.0f : float(m.monitorRight);
             rt->micMonitorFx = m.micMonitorFx;
             rt->wantSoftwareGain = true;
             if (!waveline::isPrimaryMaster(id)) {
@@ -2547,13 +2576,28 @@ void MixerService::updateStreamRouting() {
             Qt::QueuedConnection);
     });
 
+    engine_.setOnLinksChanged([this] {
+        QMetaObject::invokeMethod(this, [this] { scheduleNcIdleCheck(); },
+                                  Qt::QueuedConnection);
+    });
     engine_.setOnNodeAdded([this](const waveline::PwNode &n) {
         // Registry and stream property callbacks run on PipeWire's thread loop.
         // Router state and Qt live on the daemon thread, so queue the work.
         QMetaObject::invokeMethod(
             this,
             [this, n] {
+                // A recording just started somewhere. Its links are not there
+                // yet, so whether it reads a Waveline device is unknown --
+                // resume NC now rather than let its first moments through
+                // unprocessed, and let the check pause it again if not.
+                if (n.mediaClass == "Stream/Input/Audio" && captureMayHearProcessedMic(n)) {
+                    ncPauseTimer_.stop();
+                    setMicNoisePaused(false);
+                    scheduleNcIdleCheck();
+                }
                 bool overridesChanged = false;
+                if (!n.isOurs && !nodeChangedTimer_.isActive())
+                    nodeChangedTimer_.start();
                 if (router_) overridesChanged = router_->refreshManualPinForNode(n);
                 std::string err;
                 if (soundSharingEnabled_ && soundShare_ &&
@@ -2689,6 +2733,8 @@ void MixerService::updateStreamRouting() {
                 // The offending sink went away -- the user quit whatever was
                 // taking the streams. Clear the complaint immediately rather
                 // than leaving it up until the next time something is routed.
+                if (!n.isOurs && !nodeChangedTimer_.isActive())
+                    nodeChangedTimer_.start();
                 if (routeConflicts_.remove(QString::fromStdString(n.name)) > 0)
                     emit Changed();
 
@@ -5261,15 +5307,20 @@ QStringList MixerService::MicrophoneConsumers() const {
 
         // Which node is feeding it decides what this stream *is*. A capture
         // linked from an Audio/Sink is reading that sink's monitor -- a screen
-        // recorder taking desktop audio, or a meter -- and is not microphone
-        // use however much it looks like it from the stream alone.
+        // recorder taking desktop audio, or a meter -- and one linked from an
+        // application's output stream is reading that app's sound, which is
+        // what a music player's visualiser does with its own playback. Neither
+        // is microphone use however much it looks like it from the stream
+        // alone. An idle tap has no links, so its target.object answers.
         waveline::PwNode src;
         QString sourceLabel;
-        if (engine_.streamSourceNode(n.id, src)) {
-            if (src.mediaClass == "Audio/Sink") continue;
+        if (engine_.captureFeedNode(n, src)) {
+            if (waveline::PwEngine::isPlaybackFeed(src)) continue;
             sourceLabel = QString::fromStdString(
                 src.description.empty() ? src.name : src.description);
         } else {
+            // Asked for a monitor and not placed yet: still not a microphone.
+            if (n.capturesSink) continue;
             // Linked to nothing yet. Ordinary for the moment after a stream
             // appears, so it is reported without a source rather than dropped:
             // a shell that hid it would flicker the indicator on every start.
@@ -5300,6 +5351,95 @@ bool MixerService::ShellClientPresent() const { return shellPresent_; }
 
 void MixerService::scheduleMicConsumerSignal() {
     if (!micConsumerTimer_.isActive()) micConsumerTimer_.start();
+}
+
+void MixerService::scheduleNcIdleCheck() {
+    if (!ncIdleTimer_.isActive()) ncIdleTimer_.start();
+}
+
+bool MixerService::captureMayHearProcessedMic(const waveline::PwNode &n) const {
+    const uint32_t self = static_cast<uint32_t>(::getpid());
+    if (n.isOurs || n.processId == self) return false;
+    waveline::PwNode src;
+    // Not linked yet and no target to go on: assume the worst until the links
+    // say otherwise.
+    if (!engine_.captureFeedNode(n, src)) return true;
+    return src.isOurs || src.processId == self || src.name.rfind("waveline-", 0) == 0;
+}
+
+bool MixerService::processedMicHasListener() const {
+    // Another program recording from anything Waveline publishes: a device's
+    // or a channel's microphone, or the Stream mix a broadcaster captures.
+    // Deliberately broader than MicrophoneConsumers(), which drops sink
+    // monitors -- the Stream mix *is* a sink, and it carries the microphone.
+    for (const auto &n : engine_.nodes()) {
+        if (n.mediaClass != "Stream/Input/Audio") continue;
+        if (captureMayHearProcessedMic(n)) return true;
+    }
+
+    // Hearing a processed microphone in the headphones. A monitor fed from
+    // the dry tap (micMonitorFx off) never went through NC, so it does not
+    // count; neither does anything while the whole Monitor mix is silent.
+    const Profile &p = config_.live();
+    if (p.monitorMasterMuted || p.monitorMaster <= 0.0) return false;
+    if (p.softwareMonitor && p.micMonitorFx && !micMonitorMuted_ && micMonitorLevel_ > 0.0)
+        return true;
+    for (const MasterBusState &m : p.masterBuses) {
+        if (m.id == QLatin1String("mic") || m.busType == QLatin1String("midi")) continue;
+        if (!m.softwareMonitor || !m.micMonitorFx) continue;
+        if (m.mix.monitorMuted || m.mix.monitorVolume <= 0.0) continue;
+        if (m.monitorLeftMuted && m.monitorRightMuted) continue;
+        return true;
+    }
+
+    // A channel's published microphone monitored, or app audio ducked by a
+    // microphone: NC decides what triggers the duck you hear.
+    const auto duckedByMic = [](const DuckingState &d) {
+        if (!d.enabled) return false;
+        for (const DuckingSourceState &src : d.sources)
+            if (src.kind != QLatin1String("channel_audio")) return true;
+        return false;
+    };
+    if (duckedByMic(p.masterOutputDucking)) return true;
+    for (const ChannelEffectsState &ce : p.channelEffects) {
+        if (ce.micSource && ce.micMonitor) return true;
+        if (ce.effectsEnabled && duckedByMic(ce.ducking)) return true;
+    }
+    return false;
+}
+
+void MixerService::updateNcIdle() {
+    if (!graph_) return;
+    if (!config_.audio().autoPauseNoiseSuppression || processedMicHasListener()) {
+        ncPauseTimer_.stop();
+        setMicNoisePaused(false);
+        return;
+    }
+    if (!graph_->micNoiseIdle() && !ncPauseTimer_.isActive()) ncPauseTimer_.start();
+}
+
+void MixerService::setMicNoisePaused(bool paused) {
+    if (!graph_ || graph_->micNoiseIdle() == paused) return;
+    graph_->setMicNoiseIdle(paused);
+    qInfo("waveline: microphone noise suppression %s",
+          paused ? "paused: nothing is listening" : "resumed");
+    emit Changed();
+}
+
+bool MixerService::AutoPauseNoiseSuppression() const {
+    return config_.audio().autoPauseNoiseSuppression;
+}
+
+void MixerService::SetAutoPauseNoiseSuppression(bool on) {
+    if (config_.audio().autoPauseNoiseSuppression == on) return;
+    config_.audio().autoPauseNoiseSuppression = on;
+    scheduleSave();
+    updateNcIdle();
+    emit Changed();
+}
+
+bool MixerService::NoiseSuppressionPaused() const {
+    return graph_ && graph_->micNoiseIdle();
 }
 
 QStringList MixerService::MidiDevices() const {
@@ -5835,6 +5975,46 @@ void MixerService::SetMasterMicMonitorFx(const QString &masterId, bool on) {
         std::string err;
         graph_->rewireMasterSoftwareMonitor(masterId.toStdString(), err);
     }
+    scheduleSave();
+    emit Changed();
+}
+
+int MixerService::MasterCaptureMode(const QString &masterId) const {
+    const auto *m = masterBusState(config_.live(), masterId);
+    return m ? m->captureMode : 0;
+}
+
+void MixerService::SetMasterCaptureMode(const QString &masterId, int mode) {
+    auto *m = masterBusState(config_.live(), masterId);
+    if (!m || mode < 0 || mode > 3 || m->captureMode == mode) return;
+    m->captureMode = mode;
+    if (auto *bus = graph_ ? graph_->masterBus(masterId.toStdString()) : nullptr) {
+        bus->captureMode = mode;
+        if (bus->chain.selector) bus->chain.selector->setMode(mode);
+    }
+    scheduleSave();
+    emit Changed();
+}
+
+int MixerService::MasterCaptureChannels(const QString &masterId) const {
+    const auto *bus = graph_ ? graph_->masterBus(masterId.toStdString()) : nullptr;
+    return bus ? bus->captureChannels : 1;
+}
+
+QStringList MixerService::MasterMonitorChannels(const QString &masterId) const {
+    const auto *m = masterBusState(config_.live(), masterId);
+    if (!m) return {};
+    return {QString::number(m->monitorLeft), QString::number(m->monitorRight),
+            QString::number(m->monitorLeftMuted), QString::number(m->monitorRightMuted)};
+}
+
+void MixerService::SetMasterMonitorChannel(const QString &masterId, int channel,
+                                          double volume, bool muted) {
+    auto *m = masterBusState(config_.live(), masterId);
+    if (!m || (channel != 0 && channel != 1) || !std::isfinite(volume)) return;
+    (channel == 0 ? m->monitorLeft : m->monitorRight) = qBound(0.0, volume, 1.0);
+    (channel == 0 ? m->monitorLeftMuted : m->monitorRightMuted) = muted;
+    applyMasterMixLevels(masterId);
     scheduleSave();
     emit Changed();
 }
@@ -6493,14 +6673,7 @@ bool MixerService::linkSoundShareNode(const waveline::PwNode &n, std::string &er
     sl = "output_FL";
     sr = "output_FR";
 
-    if (masterTarget) {
-        if (!engine_.linkPorts(src, sl, dst, "input_MONO", error)) return false;
-        if (sl != sr) engine_.linkPorts(src, sr, dst, "input_MONO", error);
-    } else {
-        if (!engine_.linkPorts(src, sl, dst, "input_FL", error)) return false;
-        engine_.linkPorts(src, sr, dst, "input_FR", error);
-    }
-    return true;
+    return engine_.linkToVirtualSource(src, sl, sr, dst, error);
 }
 
 void MixerService::applySoundShareTargets() {
@@ -7330,7 +7503,8 @@ QString MixerService::PlaySoundboardSound(const QString &id) {
             spec.shareTarget = masterTarget
                                    ? waveline::masterSourceNode(target.toStdString())
                                    : ("waveline-" + target.toStdString() + "-mic");
-            spec.shareTargetMono = masterTarget;
+            spec.shareTargetMono = masterTarget &&
+                engine_.hasPort(spec.shareTarget, "input_MONO", false);
             spec.shareGain = static_cast<float>(sound->volume * board.shareVolume);
         }
     }

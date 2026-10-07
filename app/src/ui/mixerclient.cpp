@@ -139,7 +139,7 @@ MixerClient::MixerClient(QObject *parent) : QObject(parent) {
                                 QLatin1String(kIface),
                                 QDBusConnection::sessionBus(), this);
 
-    // Deliberately refresh() and not SIGNAL(changed()): relaying the daemon's
+    // Refetch before emitting changed(): relaying the daemon's
     // signal straight through announced "something changed" while channels()
     // still served the cache from the last poll, up to 400 ms stale. Every
     // write the user made came back as the value from *before* it -- a fader
@@ -149,16 +149,17 @@ MixerClient::MixerClient(QObject *parent) : QObject(parent) {
     // observes the write that prompted the signal.
     QDBusConnection::sessionBus().connect(
         QLatin1String(kService), QLatin1String(kPath), QLatin1String(kIface),
-        QStringLiteral("Changed"), this, SLOT(refresh()));
+        QStringLiteral("Changed"), this, SLOT(scheduleRefresh()));
 
-    // Two poll rates, because the two kinds of state could not be more
-    // different. A full refresh is ~47 blocking round trips (channels() alone
-    // is 26); levels are one. Running both at the meter's rate cost ~390
-    // calls/second and still only moved the meters 8 times a second.
-    //
-    // Everything that only changes when somebody touches something.
-    poll_.setInterval(400);
+    // Control changes and meter samples have separate update paths.
+    // Changed drives interactive updates. This is only a reconciliation poll
+    // for missed notifications/older daemons; rebuilding every open panel at
+    // 2.5 Hz otherwise costs hundreds of calls even in an untouched mixer.
+    poll_.setInterval(5000);
     connect(&poll_, &QTimer::timeout, this, &MixerClient::pollState);
+    refreshPending_.setSingleShot(true);
+    refreshPending_.setInterval(0);
+    connect(&refreshPending_, &QTimer::timeout, this, &MixerClient::pollState);
 
     // The meters. One call, fast enough that the widgets' interpolation has
     // something recent to aim at.
@@ -187,8 +188,9 @@ void MixerClient::probe() {
         // Back to what the file says, rather than leaving the last daemon's
         // answer standing after it is gone.
         if (!ok) readLocalProfile();
-        if (ok) { poll_.start(); levelPoll_.start(); }
+        if (ok && pollingEnabled_) { poll_.start(); levelPoll_.start(); }
         else    { poll_.stop();  levelPoll_.stop();
+                  refreshPending_.stop();
                   levelCache_.clear(); channelCache_.clear(); }
         emit availabilityChanged(available_);
         // Fill the cache before anyone reads it: rebuildStrips() runs off
@@ -204,12 +206,25 @@ void MixerClient::pollLevels() {
 
 void MixerClient::setPollingEnabled(bool on) {
     // Nothing to draw while the window is hidden, so stop paying for it.
+    const bool resumed = on && !pollingEnabled_;
+    pollingEnabled_ = on;
     if (!available_) return;
-    if (on) { poll_.start(); levelPoll_.start(); }
-    else    { poll_.stop();  levelPoll_.stop(); }
+    if (on) {
+        poll_.start(); levelPoll_.start();
+        if (resumed) { refresh(); pollLevels(); }
+    } else {
+        poll_.stop(); levelPoll_.stop(); refreshPending_.stop();
+    }
 }
 
-void MixerClient::refresh() { pollState(); }
+void MixerClient::scheduleRefresh() {
+    // Coalesce a burst of daemon notifications, including while hidden.
+    // Showing the window always fetches fresh state before resuming polling.
+    if (available_ && pollingEnabled_ && !refreshPending_.isActive())
+        refreshPending_.start();
+}
+
+void MixerClient::refresh() { refreshPending_.stop(); pollState(); }
 
 QString MixerClient::lastError() const {
     return get<QString>("LastError");
@@ -886,6 +901,18 @@ bool MixerClient::dspProfiling() const {
 
 void MixerClient::setDspProfiling(bool on) { call("SetDspProfiling", {on}); }
 
+bool MixerClient::autoPauseNoiseSuppression() const {
+    return get<bool>("AutoPauseNoiseSuppression", true);
+}
+
+void MixerClient::setAutoPauseNoiseSuppression(bool on) {
+    call("SetAutoPauseNoiseSuppression", {on});
+}
+
+bool MixerClient::noiseSuppressionPaused() const {
+    return get<bool>("NoiseSuppressionPaused", false);
+}
+
 int MixerClient::shellNoiseSuppressionInputs() const {
     // One, matching the daemon's default: an unreachable daemon must not make
     // the spin box claim the setting is something it is not.
@@ -1404,6 +1431,33 @@ bool MixerClient::masterMicMonitorFx(const QString &masterId) const {
     QDBusReply<bool> r =
         iface_->call(QStringLiteral("MasterMicMonitorFx"), masterId);
     return r.isValid() && r.value();
+}
+
+int MixerClient::masterCaptureMode(const QString &masterId) const {
+    if (!iface_ || !iface_->isValid()) return 0;
+    QDBusReply<int> reply = iface_->call(QStringLiteral("MasterCaptureMode"), masterId);
+    return reply.isValid() ? reply.value() : 0;
+}
+
+void MixerClient::setMasterCaptureMode(const QString &masterId, int mode) {
+    call("SetMasterCaptureMode", {masterId, mode});
+}
+
+int MixerClient::masterCaptureChannels(const QString &masterId) const {
+    if (!iface_ || !iface_->isValid()) return 1;
+    QDBusReply<int> reply = iface_->call(QStringLiteral("MasterCaptureChannels"), masterId);
+    return reply.isValid() ? reply.value() : 1;
+}
+
+QStringList MixerClient::masterMonitorChannels(const QString &masterId) const {
+    if (!iface_ || !iface_->isValid()) return {};
+    QDBusReply<QStringList> reply = iface_->call(QStringLiteral("MasterMonitorChannels"), masterId);
+    return reply.isValid() ? reply.value() : QStringList{};
+}
+
+void MixerClient::setMasterMonitorChannel(const QString &masterId, int channel,
+                                          double volume, bool muted) {
+    call("SetMasterMonitorChannel", {masterId, channel, volume, muted});
 }
 
 bool MixerClient::masterMicStereo(const QString &masterId) const {

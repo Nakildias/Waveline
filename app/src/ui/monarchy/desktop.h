@@ -67,23 +67,6 @@ class Settings : public QObject {
     Q_OBJECT
 
 public:
-    enum class ButtonStyle {
-        Plasma,
-        Gnome,
-        MacSierra,
-        MacDarkAurorae,
-        SbeSierra,
-        SbeSierraActive,
-        SbeSierraInactive,
-        SbeDarkAurorae,
-        SbeDarkAuroraeActive,
-        SbeDarkAuroraeInactive,
-        SierraColorSymbols,
-        DarkAuroraeColorSymbols,
-        SierraMonochromeSymbols,
-        DarkAuroraeMonochromeSymbols,
-    };
-
     static Settings &instance();
 
     // The side of one traffic light's box, and the gaps between and around
@@ -91,15 +74,26 @@ public:
     int buttonSize() const { return buttonSize_; }
     int buttonSpacing() const { return buttonSpacing_; }
     int buttonPadding() const { return buttonPadding_; }
-    bool animationsEnabled() const { return animationsEnabled_; }
-    int animationsDuration() const { return animationsDuration_; }
-    ButtonStyle buttonStyle() const { return buttonStyle_; }
+    // [Buttons] Style=flat (plain discs rather than glass beads),
+    // ZoomOnHover (the button under the pointer grows) and InactiveState (an
+    // inactive window's buttons go grey). All off by default, as in Monarchy.
+    bool flatButtons() const { return flatButtons_; }
+    bool zoomOnHover() const { return zoomOnHover_; }
+    bool inactiveState() const { return inactiveState_; }
 
-    // The shadow's parameters, as the decoration reads them from [Common].
-    int cornerRadius() const { return cornerRadius_; }
-    int shadowSize() const { return shadowSize_; }        // 0 (none) .. 4
-    int shadowStrength() const { return shadowStrength_; } // 25 .. 255
-    QColor shadowColor() const { return shadowColor_; }
+    // One window shadow as titlebar-rc [Shadow] configures it: a size step
+    // (0 none, 1 small, 2 medium, 3 large, 4 huge), a strength 25..255 and
+    // a colour. Monarchy's common/titlebar/window_shadow_settings.
+    struct ShadowStyle {
+        int size = 3;
+        int strength = 255;
+        QColor colour = Qt::black;
+    };
+    const ShadowStyle &activeShadow() const { return activeShadow_; }
+    // [Shadow] SeparateInactive: an inactive window wears inactiveShadow()
+    // rather than activeShadow().
+    bool separateInactiveShadow() const { return separateInactiveShadow_; }
+    const ShadowStyle &inactiveShadow() const { return inactiveShadow_; }
 
     // The background's alpha byte for a window that paints its own, as
     // Monarchy's windows do. The light scheme is drawn a little more opaque,
@@ -140,13 +134,12 @@ private:
     int buttonSize_ = 18;
     int buttonSpacing_ = 2;
     int buttonPadding_ = 2;
-    bool animationsEnabled_ = true;
-    int animationsDuration_ = 150;
-    ButtonStyle buttonStyle_ = ButtonStyle::MacDarkAurorae;
-    int cornerRadius_ = 0;
-    int shadowSize_ = 3;
-    int shadowStrength_ = 255;
-    QColor shadowColor_ = Qt::black;
+    bool flatButtons_ = false;
+    bool zoomOnHover_ = false;
+    bool inactiveState_ = false;
+    ShadowStyle activeShadow_;
+    bool separateInactiveShadow_ = false;
+    ShadowStyle inactiveShadow_;
     int opacityPercent_ = 85;
     MenuSurface menuSurface_;
     int kwinCornerRadius_ = 14;

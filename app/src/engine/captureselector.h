@@ -23,12 +23,14 @@ public:
     CaptureSelector &operator=(const CaptureSelector &) = delete;
 
     bool start(const std::string &nodeName, const std::string &description,
-               std::string &error);
+               std::string &error, int channels = 1);
     void stop();
 
     void select(std::size_t index);
     void selectSilence();
-    static std::string inputPort(std::size_t index);
+    // Stereo, left to both, right to both, or averaged mono.
+    void setMode(int mode);
+    static std::string inputPort(std::size_t index, int channel = 0);
 
     struct Health {
         uint64_t instance = 0, xruns = 0, cycles = 0;

@@ -178,6 +178,9 @@ struct MasterBusState {
     // Software monitor of this master's microphone in the Monitor mix.
     bool softwareMonitor = false;
     bool micStereo = true;
+    int captureMode = 0; // 0 stereo, 1 left, 2 right, 3 average; ignored for mono hardware.
+    double monitorLeft = 1.0, monitorRight = 1.0;
+    bool monitorLeftMuted = false, monitorRightMuted = false;
     double micInputVolume = 1.0;
     bool micInputMuted = false;
     int hardwareMonitor = -1;
@@ -406,6 +409,12 @@ struct AudioSettings {
     // that already exist, which is why the mixer restarts the daemon to apply
     // it rather than pretending the switch is live.
     bool realtime = true;
+    // Pause microphone noise suppression while nothing can hear the
+    // processed microphone: no application recording a Waveline device, no
+    // software monitor of a processed mic, and no ducking keyed from one.
+    // The user's NC switches are untouched; this is a CPU saving only, so it
+    // is machine policy rather than part of a profile. On by default.
+    bool autoPauseNoiseSuppression = true;
 };
 
 // One Soundboard sound. Machine-wide (like CompanionSettings below) rather

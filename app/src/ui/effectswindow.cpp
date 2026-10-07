@@ -1413,7 +1413,8 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
     Monarchy::WindowChrome::adopt(this, lay);
 
     auto *centreRow = new QHBoxLayout;
-    auto *centreLabel = new QLabel(tr("Centre the microphone"), this);
+    auto *centreLabel = new QLabel(tr("Centre the mono microphone"), this);
+    captureLayoutLabel_ = centreLabel;
     centreLabel->setToolTip(
         tr("Copy the mono capture to both stereo channels in the mixes."));
     micStereo_ = new ToggleSwitch(this);
@@ -1421,10 +1422,45 @@ GlobalEffectsWindow::GlobalEffectsWindow(MixerClient *client, const QString &mas
     centreRow->addWidget(centreLabel);
     centreRow->addStretch();
     centreRow->addWidget(micStereo_);
+    captureMode_ = new QComboBox(this);
+    captureMode_->addItems({tr("Stereo"), tr("Mono: left"), tr("Mono: right"), tr("Mono: average L + R")});
+    captureMode_->setToolTip(tr("Stereo preserves both capsules. Choose a mono mode for a two-channel device carrying a mono signal. This changes recordings and both mixes."));
+    centreRow->addWidget(captureMode_);
+    connect(captureMode_, &QComboBox::activated, this, [this](int mode) {
+        client_->setMasterCaptureMode(masterId_, mode);
+    });
     lay->addLayout(centreRow);
     connect(micStereo_, &QAbstractButton::toggled, this, [this](bool on) {
         client_->setMasterMicStereo(masterId_, on);
     });
+
+    stereoMonitorControls_ = new QWidget(this);
+    auto *stereoMonitorLayout = new QVBoxLayout(stereoMonitorControls_);
+    stereoMonitorLayout->setContentsMargins(0, 0, 0, 0);
+    for (int channel = 0; channel < 2; ++channel) {
+        auto *row = new QHBoxLayout;
+        row->addWidget(new QLabel(channel == 0 ? tr("Monitor left") : tr("Monitor right"), this));
+        auto *volume = new QSlider(Qt::Horizontal, this);
+        volume->setRange(0, 100);
+        volume->setValue(100);
+        volume->setToolTip(tr("Headphone level for this side only. Recordings and Stream mix are unchanged."));
+        auto *enabled = new ToggleSwitch(this);
+        enabled->setChecked(true);
+        enabled->setToolTip(tr("Listen to this side in the Monitor mix. The input device's monitor must also be on."));
+        monitorLaneVolume_[channel] = volume;
+        monitorLaneEnabled_[channel] = enabled;
+        row->addWidget(volume, 1);
+        row->addWidget(enabled);
+        stereoMonitorLayout->addLayout(row);
+        auto publish = [this, channel] {
+            client_->setMasterMonitorChannel(masterId_, channel,
+                monitorLaneVolume_[channel]->value() / 100.0,
+                !monitorLaneEnabled_[channel]->isChecked());
+        };
+        connect(volume, &QSlider::valueChanged, this, publish);
+        connect(enabled, &QAbstractButton::toggled, this, publish);
+    }
+    lay->addWidget(stereoMonitorControls_);
 
     tabs_ = new QTabWidget(this);
     styleEffectsTabs(tabs_);
@@ -1866,7 +1902,27 @@ void GlobalEffectsWindow::refresh() {
     QSignalBlocker b17(limitThreshold_);
 
     noise_->setChecked(client_->masterNoiseSuppression(masterId_));
-    micStereo_->setChecked(client_->masterMicStereo(masterId_));
+    const bool stereoCapture = client_->masterCaptureChannels(masterId_) == 2;
+    captureLayoutLabel_->setText(stereoCapture ? tr("Capture mode")
+                                               : tr("Centre the mono microphone"));
+    micStereo_->setVisible(!stereoCapture);
+    captureMode_->setVisible(stereoCapture);
+    {
+        const QSignalBlocker captureBlock(captureMode_);
+        captureMode_->setCurrentIndex(client_->masterCaptureMode(masterId_));
+    }
+    micStereo_->setChecked(!stereoCapture && client_->masterMicStereo(masterId_));
+    stereoMonitorControls_->setVisible(stereoCapture);
+    const auto monitorChannels = client_->masterMonitorChannels(masterId_);
+    if (monitorChannels.size() == 4) {
+        for (int channel = 0; channel < 2; ++channel) {
+            const QSignalBlocker volumeBlock(monitorLaneVolume_[channel]);
+            const QSignalBlocker muteBlock(monitorLaneEnabled_[channel]);
+            if (!monitorLaneVolume_[channel]->isSliderDown())
+                monitorLaneVolume_[channel]->setValue(qRound(monitorChannels[channel].toDouble() * 100));
+            monitorLaneEnabled_[channel]->setChecked(!monitorChannels[channel + 2].toInt());
+        }
+    }
 
     const ChannelFxInfo fx =
         client_->masterChannelEffects(masterId_, QStringLiteral("input"));
@@ -2912,25 +2968,7 @@ ChannelEffectsWindow::ChannelEffectsWindow(const QString &channelId,
 void ChannelEffectsWindow::refreshInputLevels() {
     if (!isVisible() || !client_->available() || !inputNoiseIn_ || !inputNoiseOut_) return;
     const auto &l = client_->levels();
-    // Which chain these two meters are actually straddling.
-    //
-    // The pair exists to show noise suppression working: the difference
-    // between In and Out is the whole point of drawing them. So they have to
-    // follow the filters that are in the path, and in two of the three modes
-    // those are not this channel's own.
-    //
-    // An effect-source device was already handled. Device FX was not, and read
-    // this channel's probes regardless -- but in that mode the channel's mic
-    // filters are bypassed entirely, so both probes sit on the same untouched
-    // signal and report the same number. That is the bug this fixes: two
-    // meters at an identical third of full scale, under controls greyed out
-    // for doing nothing, implying a before/after that was always a no-op.
-    QString source = client_->channelEffectSourceMasterId(channelId_,
-                                                          QStringLiteral("input"));
-    if (source.isEmpty() && client_->channelMicUseDeviceFx(channelId_))
-        source = client_->channelMasterMic(channelId_);
-
-    const QString base = source.isEmpty() ? channelId_ : source;
+    const QString &base = inputMeterBase_;
     inputNoiseIn_->setLevel(
         meterPosition(l.value(base + QStringLiteral("-in"), 0.0)));
     inputNoiseOut_->setLevel(
@@ -3323,6 +3361,15 @@ void ChannelEffectsWindow::setMicTabEnabled(bool on) {
 
 void ChannelEffectsWindow::refresh() {
     if (!client_->available() || !isVisible()) return;
+
+    // Routing is control state, not meter data. Resolve it on show/change,
+    // avoiding two or three blocking D-Bus calls on every 16 ms meter tick.
+    QString source = client_->channelEffectSourceMasterId(channelId_,
+                                                         QStringLiteral("input"));
+    if (source.isEmpty() && client_->channelMicUseDeviceFx(channelId_))
+        source = client_->channelMasterMic(channelId_);
+    inputMeterBase_ = source.isEmpty() ? channelId_ : source;
+    refreshInputLevels();
 
     // Ahead of the signature check below, which is computed from the effect
     // settings alone: turning the recording device on or off changes none of

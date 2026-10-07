@@ -347,13 +347,8 @@ bool SoundboardVoice::start(PwEngine &engine, std::shared_ptr<const SoundboardBu
 
     if (wantShare) {
         engine.waitForPort(spec.nodeName, "share_FL", true, 1000);
-        if (spec.shareTargetMono) {
-            engine.linkPorts(spec.nodeName, "share_FL", spec.shareTarget, "input_MONO", error);
-            engine.linkPorts(spec.nodeName, "share_FR", spec.shareTarget, "input_MONO", error);
-        } else {
-            engine.linkPorts(spec.nodeName, "share_FL", spec.shareTarget, "input_FL", error);
-            engine.linkPorts(spec.nodeName, "share_FR", spec.shareTarget, "input_FR", error);
-        }
+        engine.linkToVirtualSource(spec.nodeName, "share_FL", "share_FR",
+                                   spec.shareTarget, error);
     }
 
     if (!ok) return false;

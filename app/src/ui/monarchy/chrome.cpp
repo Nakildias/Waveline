@@ -31,7 +31,11 @@
 #include <KWindowEffects>
 #include <KWindowShadow>
 
-#include "boxshadowrenderer.h"
+#include <QImage>
+#include <QMargins>
+#include <QVector>
+
+#include <cmath>
 #endif
 
 namespace Monarchy {
@@ -39,28 +43,27 @@ namespace Monarchy {
 namespace {
 
 // ============================================================ traffic lights
-// Everything here is Monarchy's common/windowchrome/window_buttons.cc and
-// common/titlebar/traffic_light_glass.h, which in turn are the decoration's
-// src/shell/titlebar/breezebutton.cpp: an 18-unit design drawn in a 20-unit
-// box, a dot of radius 7 that grows to 9 under the pointer.
-
-using Style = Settings::ButtonStyle;
+// Everything here is Monarchy's common/titlebar/traffic_light_paint.cc,
+// common/titlebar/traffic_light_glass.h and common/windowchrome/window_buttons.cc:
+// an 18-unit design drawn at seven ninths of a 20-unit box, a glass bead or a
+// flat disc, its glyph shown while the pointer is over it. [Buttons]
+// ZoomOnHover grows it under the pointer and [Buttons] InactiveState greys an
+// inactive window's buttons; with both off (the default) it does neither.
 
 constexpr qreal kDesignBox = 20.0;
+constexpr qreal kScale = 7.0 / 9.0;
+constexpr qreal kInset = 4.0;
 constexpr qreal kCentre = 9.0;
-constexpr qreal kRadiusIdle = 7.0;
-constexpr qreal kRadiusHover = 9.0;
-constexpr qreal kButtonPen = 1.01;
-constexpr qreal kSymbolPen = 1.7;
-const QColor kDarkSymbol(34, 45, 50);
-const QColor kLightSymbol(250, 251, 252);
+constexpr qreal kRadius = 9.0;
+// Strokes thickened by the same 9/7 the design is shrunk by.
+constexpr qreal kOutlinePen = 1.01 * 9.0 / 7.0;
+constexpr qreal kGlyphPen = 1.7 * 9.0 / 7.0;
+// How much a bead grows under the pointer; still inside its box.
+constexpr qreal kHoverZoom = 1.2;
+constexpr int kZoomMs = 120;
+const QColor kGlyph(34, 45, 50);
 
 enum class Light { Close, Minimise, Maximise };
-
-bool isSbeSierra(Style s) {
-    return s == Style::SbeSierra || s == Style::SbeSierraActive
-        || s == Style::SbeSierraInactive;
-}
 
 QColor lightColour(Light light) {
     switch (light) {
@@ -69,13 +72,6 @@ QColor lightColour(Light light) {
     case Light::Maximise: return QColor(40, 215, 60);
     }
     return QColor();
-}
-
-QColor symbolColour(const QColor &bar, bool inactive, bool useActive, bool useInactive) {
-    if (useActive || (!inactive && !useInactive)) return kDarkSymbol;
-    const qreal lum = 0.299 * qRed(bar.rgb()) + 0.587 * qGreen(bar.rgb())
-                    + 0.114 * qBlue(bar.rgb());
-    return (lum > 186 || qGreen(bar.rgb()) > 186) ? kDarkSymbol : kLightSymbol;
 }
 
 // QColor::lighter()/darker() move the value alone, which drains a bright hue;
@@ -146,10 +142,11 @@ public:
         setCursor(Qt::ArrowCursor);
         setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_Hover);
-        hover_.setStartValue(0.0);
-        hover_.setEndValue(1.0);
-        hover_.setEasingCurve(QEasingCurve::OutCubic);
-        QObject::connect(&hover_, &QVariantAnimation::valueChanged, this,
+        zoom_.setDuration(kZoomMs);
+        zoom_.setEasingCurve(QEasingCurve::OutCubic);
+        zoom_.setStartValue(1.0);
+        zoom_.setEndValue(1.0);
+        QObject::connect(&zoom_, &QVariantAnimation::valueChanged, this,
                          [this] { update(); });
         applySettings();
     }
@@ -157,79 +154,64 @@ public:
     void applySettings() {
         const Settings &s = Settings::instance();
         setFixedSize(s.buttonSize(), s.buttonSize());
-        hover_.setDuration(s.animationsDuration());
-        if (!s.animationsEnabled()) hover_.stop();
         update();
     }
 
 protected:
-    void enterEvent(QEnterEvent *) override { animate(true); }
-    void leaveEvent(QEvent *) override { animate(false); }
+    void enterEvent(QEnterEvent *) override { zoomTo(kHoverZoom); }
+    void leaveEvent(QEvent *) override { zoomTo(1.0); }
+    void changeEvent(QEvent *event) override {
+        // The window gaining or losing focus changes the inactive look.
+        if (event->type() == QEvent::ActivationChange) update();
+        QAbstractButton::changeEvent(event);
+    }
 
     void paintEvent(QPaintEvent *) override {
         const Settings &s = Settings::instance();
-        const bool animated = s.animationsEnabled();
-        const bool sbe = isSbeSierra(s.buttonStyle());
-        const bool useActive = s.buttonStyle() == Style::SbeSierraActive;
-        const bool useInactive = s.buttonStyle() == Style::SbeSierraInactive;
-        const bool inactive = !window() || !window()->isActiveWindow();
-        const bool wearsInactive = sbe && ((inactive && !useActive) || useInactive);
-
         const QColor bar = palette().color(QPalette::Window);
-        const bool darkBar = qGray(bar.rgb()) < 128;
+        const bool hovered = underMouse();
+        const bool inactive = s.inactiveState() && !isActiveWindow();
+        const qreal zoom = s.zoomOnHover() ? zoom_.currentValue().toReal() : 1.0;
 
-        QColor colour;
-        if (sbe || !inactive)
-            colour = lightColour(light_);
-        else
-            colour = darkBar ? QColor(100, 100, 100) : QColor(200, 200, 200);
+        // Greyed on an inactive window, a shade that sits back on either bar;
+        // the pointer brings the colour back with the glyph.
+        const QColor colour =
+            inactive && !hovered
+                ? (qGray(bar.rgb()) < 128 ? QColor(100, 100, 100) : QColor(200, 200, 200))
+                : lightColour(light_);
 
         const qreal box = width();
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        // With animations off the decoration draws the design seven ninths as
-        // large and centred differently; so does this.
-        if (animated) {
-            p.scale(box / kDesignBox, box / kDesignBox);
-            p.translate(1, 1);
-        } else {
-            p.scale(7.0 / 9.0 * box / kDesignBox, 7.0 / 9.0 * box / kDesignBox);
-            p.translate(4, 4);
-        }
+        p.scale(kScale * box / kDesignBox, kScale * box / kDesignBox);
+        p.translate(kInset, kInset);
+        // A small button needs a wider pen to land on a whole pixel.
         const qreal penScale = qMax(qreal(1.0), kDesignBox / box);
-        const qreal thicken = animated ? 1.0 : 9.0 / 7.0;
+        if (zoom != 1.0) {
+            p.translate(kCentre, kCentre);
+            p.scale(zoom, zoom);
+            p.translate(-kCentre, -kCentre);
+        }
 
-        const qreal grown = hover_.currentValue().isValid()
-                                ? hover_.currentValue().toReal() : 0.0;
-        const qreal radius = animated
-            ? kRadiusIdle + (kRadiusHover - kRadiusIdle) * grown : kRadiusHover;
-
+        if (s.flatButtons()) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(colour);
+            p.drawEllipse(QPointF(kCentre, kCentre), kRadius, kRadius);
+        } else {
+            paintGlass(&p, QPointF(kCentre, kCentre), kRadius, colour);
+        }
         QPen outline(qGray(bar.rgb()) < 69 ? colour.lighter(115) : colour.darker(115));
         outline.setJoinStyle(Qt::MiterJoin);
-        outline.setWidthF(thicken * kButtonPen * penScale);
+        outline.setWidthF(kOutlinePen * penScale);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(outline);
+        p.drawEllipse(QPointF(kCentre, kCentre), kRadius, kRadius);
 
-        if (wearsInactive && underMouse()) {
-            p.setBrush(Qt::NoBrush);
-            p.setPen(outline);
-        } else if (wearsInactive) {
-            p.setBrush(Qt::NoBrush);
-            p.setPen(Qt::NoPen);
-        } else {
-            paintGlass(&p, QPointF(kCentre, kCentre), radius, colour);
-            p.setBrush(Qt::NoBrush);
-            p.setPen(outline);
-        }
-        p.drawEllipse(QPointF(kCentre, kCentre), radius, radius);
-
-        const bool showSymbol = underMouse() || wearsInactive;
-        if (!showSymbol) return;
-        if (!sbe && inactive) return;
-
-        const QColor ink = symbolColour(bar, inactive, useActive, useInactive);
-        QPen symbol(ink);
-        symbol.setJoinStyle(Qt::MiterJoin);
-        symbol.setWidthF(thicken * kSymbolPen * penScale);
-        p.setPen(symbol);
+        if (!hovered) return;
+        QPen glyph(kGlyph);
+        glyph.setJoinStyle(Qt::MiterJoin);
+        glyph.setWidthF(kGlyphPen * penScale);
+        p.setPen(glyph);
 
         switch (light_) {
         case Light::Close:
@@ -248,55 +230,173 @@ protected:
                 first.moveTo(5, 13);  first.lineTo(11, 13); first.lineTo(5, 7);
                 second.moveTo(13, 5); second.lineTo(7, 5);  second.lineTo(13, 11);
             }
-            p.fillPath(first, ink);
-            p.fillPath(second, ink);
+            p.fillPath(first, kGlyph);
+            p.fillPath(second, kGlyph);
             break;
         }
         }
     }
 
 private:
-    void animate(bool entering) {
-        if (!Settings::instance().animationsEnabled()) {
-            update();
-            return;
-        }
-        hover_.stop();
-        hover_.setDirection(entering ? QAbstractAnimation::Forward
-                                     : QAbstractAnimation::Backward);
-        hover_.start();
+    // From wherever the bead is now, so a quick in and out does not jump.
+    void zoomTo(qreal target) {
+        zoom_.stop();
+        zoom_.setStartValue(zoom_.currentValue().toReal());
+        zoom_.setEndValue(target);
+        if (Settings::instance().zoomOnHover())
+            zoom_.start();
+        else
+            zoom_.setCurrentTime(kZoomMs);
         update();
     }
 
     Light light_;
-    QVariantAnimation hover_;
+    QVariantAnimation zoom_;
 };
 
 // ===================================================================== shadow
 #ifdef WAVELINE_HAVE_KWINDOWSYSTEM
 // The decoration's shadow, for a window without one: Monarchy's
-// common/windowchrome/window_shadow.cc, which is Breeze's
-// Decoration::updateActiveShadow() handed to KWin as the window's own.
+// common/titlebar/window_shadow_texture.cc and common/windowchrome/
+// window_shadow.cc, the same texture TitleBar hands KWin for a decorated
+// window, rendered from the same [Shadow] settings.
 
-constexpr int kShadowOverlap = 3;
+// Two soft copies of the window's outline under it: a wide faint one for
+// depth and a tight darker one that seats it. `blur` is two deviations.
+struct ShadowBlob {
+    int drop;
+    int blur;
+    qreal alpha;
+};
+struct ShadowShape {
+    ShadowBlob wide;
+    ShadowBlob tight;
+};
 
-struct ShadowLayer {
-    QPoint offset;
-    int radius;
-    qreal opacity;
+// Each step drops both blobs further, spreads them wider and lightens them a
+// tenth, so a bigger shadow does not also read darker.
+ShadowShape shadowShape(int size) {
+    const int step = (size >= 0 && size < 5) ? size : 3;
+    if (step == 0) return {{0, 0, 0.0}, {0, 0, 0.0}};
+    return {{4 * step, 16 * step, (11 - step) / 10.0},
+            {2 * step, 8 * step, (5 - step) / 10.0}};
+}
+
+// How far the shadow tucks in under the window's edge, so no seam shows.
+constexpr int kTuckUnder = 3;
+// A Gaussian taken to have died away 2.82 deviations out.
+constexpr qreal kReachInDeviations = 2.82;
+
+qreal deviation(int blur) { return 0.5 * blur; }
+
+int reach(int blur) {
+    return qMax(2, int(std::floor(deviation(blur) * kReachInDeviations + 0.5)));
+}
+
+// The window's rectangle blurred, along one axis: the share of a Gaussian
+// centred on each pixel that falls between `from` and `to`. A blurred
+// rectangle is the product of its two axes.
+QVector<qreal> blurredSpan(int length, qreal from, qreal to, qreal sigma) {
+    QVector<qreal> span(length);
+    const qreal scale = 1.0 / (sigma * std::sqrt(2.0));
+    for (int i = 0; i < length; ++i) {
+        const qreal centre = i + 0.5;
+        span[i] = 0.5 * (std::erf((to - centre) * scale) - std::erf((from - centre) * scale));
+    }
+    return span;
+}
+
+// One shadow, cut into the eight tiles KWin wants.
+struct ShadowTexture {
+    bool none = true;
+    QMargins padding;
+    KWindowShadowTile::Ptr tiles[8];  // Clockwise from the top-left corner.
 };
-struct ShadowParams {
-    QPoint offset;
-    ShadowLayer first;
-    ShadowLayer second;
-};
-const ShadowParams kShadowParams[] = {
-    {{0, 0}, {{0, 0}, 0, 0}, {{0, 0}, 0, 0}},
-    {{0, 4}, {{0, 0}, 16, 1.0}, {{0, -2}, 8, 0.4}},
-    {{0, 8}, {{0, 0}, 32, 0.9}, {{0, -4}, 16, 0.3}},
-    {{0, 12}, {{0, 0}, 48, 0.8}, {{0, -6}, 24, 0.2}},
-    {{0, 16}, {{0, 0}, 64, 0.7}, {{0, -8}, 32, 0.1}},
-};
+
+ShadowTexture renderShadow(const Settings::ShadowStyle &style) {
+    ShadowTexture texture;
+    const ShadowShape shape = shadowShape(style.size);
+    if (shape.wide.blur == 0 && shape.tight.blur == 0) return texture;
+
+    const ShadowBlob blobs[] = {shape.wide, shape.tight};
+    const qreal strength = qBound(0, style.strength, 255) / 255.0;
+
+    // How far past the window each side of the image has to reach.
+    int left = 0, top = 0, right = 0, bottom = 0, furthest = 0;
+    for (const ShadowBlob &blob : blobs) {
+        const int out = reach(blob.blur) - kTuckUnder;
+        left = qMax(left, out);
+        right = qMax(right, out);
+        top = qMax(top, out - blob.drop);
+        bottom = qMax(bottom, out + blob.drop);
+        furthest = qMax(furthest, reach(blob.blur) + blob.drop);
+    }
+
+    // A stand-in window just big enough that no corner's blur reaches the
+    // centre lines KWin stretches along the real window's edges.
+    const int window = 2 * (furthest + kTuckUnder) + 1;
+    const QSize size(left + window + right, top + window + bottom);
+    QImage image(size, QImage::Format_ARGB32_Premultiplied);
+
+    // What each blob leaves uncovered, multiplied up: two shadows over each
+    // other compound the way two layers of tint do.
+    QVector<qreal> clear(size.width() * size.height(), 1.0);
+    for (const ShadowBlob &blob : blobs) {
+        const qreal opacity = blob.alpha * strength;
+        if (opacity <= 0.0 || blob.blur <= 0) continue;
+        const QRectF box = QRectF(left, top, window, window)
+                               .adjusted(kTuckUnder, kTuckUnder, -kTuckUnder, -kTuckUnder)
+                               .translated(0, blob.drop);
+        const qreal sigma = deviation(blob.blur);
+        const QVector<qreal> across = blurredSpan(size.width(), box.left(), box.right(), sigma);
+        const QVector<qreal> down = blurredSpan(size.height(), box.top(), box.bottom(), sigma);
+        for (int y = 0; y < size.height(); ++y) {
+            qreal *row = clear.data() + y * size.width();
+            for (int x = 0; x < size.width(); ++x) row[x] *= 1.0 - opacity * across[x] * down[y];
+        }
+    }
+
+    const QColor colour = style.colour;
+    for (int y = 0; y < size.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+        const qreal *row = clear.constData() + y * size.width();
+        for (int x = 0; x < size.width(); ++x) {
+            const int alpha = qRound(255.0 * (1.0 - row[x]));
+            line[x] = qRgba(colour.red() * alpha / 255, colour.green() * alpha / 255,
+                            colour.blue() * alpha / 255, alpha);
+        }
+    }
+
+    {
+        // The window's own shape cut out, so nothing of the shadow shows
+        // through a translucent window.
+        QPainter p(&image);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::black);
+        p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+        const qreal corner = 0.25 * Settings::smallSpacing();
+        p.drawRoundedRect(QRectF(left, top, window, window), corner, corner);
+    }
+
+    texture.none = false;
+    texture.padding = QMargins(left, top, right, bottom);
+    const int cx = left + window / 2;
+    const int cy = top + window / 2;
+    const int rightPiece = image.width() - cx - 1;
+    const int bottomPiece = image.height() - cy - 1;
+    const QRect pieces[8] = {
+        {0, 0, cx, cy},                            {cx, 0, 1, cy},
+        {cx + 1, 0, rightPiece, cy},               {cx + 1, cy, rightPiece, 1},
+        {cx + 1, cy + 1, rightPiece, bottomPiece}, {cx, cy + 1, 1, bottomPiece},
+        {0, cy + 1, cx, bottomPiece},              {0, cy, cx, 1},
+    };
+    for (int i = 0; i < 8; ++i) {
+        texture.tiles[i] = KWindowShadowTile::Ptr::create();
+        texture.tiles[i]->setImage(image.copy(pieces[i]));
+    }
+    return texture;
+}
 
 class ShadowAttachment : public QObject {
 public:
@@ -318,6 +418,12 @@ protected:
                 break;
             case QEvent::Hide:
                 shadow_->destroy();
+                break;
+            case QEvent::ActivationChange:
+                // Only when the inactive shadow is set apart does focus move it.
+                if (Settings::instance().separateInactiveShadow()
+                    && window_->isActiveWindow() != active_)
+                    rebuild();
                 break;
             case QEvent::WindowStateChange:
                 rebuild();
@@ -346,78 +452,44 @@ private:
         handle_->installEventFilter(this);
     }
 
+    // Re-rendered only when the shadow's own settings moved: the file holds
+    // the button settings too, and Settings::changed() fires for those.
     void render() {
         const Settings &s = Settings::instance();
-        const ShadowParams &params = kShadowParams[qBound(0, s.shadowSize(), 4)];
-        none_ = qMax(params.first.radius, params.second.radius) == 0;
-        if (none_) return;
-
-        const auto withOpacity = [](QColor c, qreal o) { c.setAlphaF(o); return c; };
-        const int spacing = Settings::smallSpacing();
-        const qreal radius = 0.5 * spacing * (s.cornerRadius() + 0.5);
-        const QSize boxSize =
-            Breeze::BoxShadowRenderer::calculateMinimumBoxSize(2 * spacing * params.first.radius)
-                .expandedTo(Breeze::BoxShadowRenderer::calculateMinimumBoxSize(
-                    2 * spacing * params.second.radius));
-
-        Breeze::BoxShadowRenderer renderer;
-        renderer.setBorderRadius(radius);
-        renderer.setBoxSize(boxSize);
-        const qreal factor = s.shadowStrength() / 255.0;
-        renderer.addShadow(params.first.offset, params.first.radius,
-                           withOpacity(s.shadowColor(), params.first.opacity * factor));
-        renderer.addShadow(params.second.offset, params.second.radius,
-                           withOpacity(s.shadowColor(), params.second.opacity * factor));
-
-        QImage image = renderer.render();
-        const QRect outer = image.rect();
-        QRect box(QPoint(0, 0), boxSize);
-        box.moveCenter(outer.center());
-        padding_ = QMargins(box.left() - outer.left() - kShadowOverlap - params.offset.x(),
-                            box.top() - outer.top() - kShadowOverlap - params.offset.y(),
-                            outer.right() - box.right() - kShadowOverlap + params.offset.x(),
-                            outer.bottom() - box.bottom() - kShadowOverlap + params.offset.y());
-        {
-            // The window's own shape cut out, so nothing of the shadow shows
-            // through a translucent window.
-            QPainter p(&image);
-            p.setRenderHint(QPainter::Antialiasing);
-            p.setPen(Qt::NoPen);
-            p.setBrush(Qt::black);
-            p.setCompositionMode(QPainter::CompositionMode_DestinationOut);
-            p.drawRoundedRect(outer - padding_, radius, radius);
-        }
-
-        const int cx = outer.center().x();
-        const int cy = outer.center().y();
-        const int right = image.width() - cx - 1;
-        const int bottom = image.height() - cy - 1;
-        const QRect pieces[8] = {
-            {0, 0, cx, cy},                  {cx, 0, 1, cy},
-            {cx + 1, 0, right, cy},          {cx + 1, cy, right, 1},
-            {cx + 1, cy + 1, right, bottom}, {cx, cy + 1, 1, bottom},
-            {0, cy + 1, cx, bottom},         {0, cy, cx, 1},
+        const auto describe = [](const Settings::ShadowStyle &style) {
+            return QStringLiteral("%1/%2/%3").arg(style.size).arg(style.strength)
+                .arg(style.colour.name(QColor::HexArgb));
         };
-        for (int i = 0; i < 8; ++i) {
-            tiles_[i] = KWindowShadowTile::Ptr::create();
-            tiles_[i]->setImage(image.copy(pieces[i]));
-        }
+        const QString key = describe(s.activeShadow()) + QLatin1Char('|')
+            + (s.separateInactiveShadow() ? describe(s.inactiveShadow()) : QString())
+            + QLatin1Char('|') + QString::number(Settings::smallSpacing());
+        if (key == key_) return;
+        key_ = key;
+        active_tex_ = renderShadow(s.activeShadow());
+        inactive_tex_ = s.separateInactiveShadow() ? renderShadow(s.inactiveShadow())
+                                                   : ShadowTexture();
     }
 
     // A created shadow is fixed, so any change is a destroy and a create.
     void rebuild() {
         shadow_->destroy();
-        if (!handle_ || !window_->isVisible() || none_) return;
+        if (!handle_ || !window_->isVisible()) return;
+        // A full-screen window has no edge to cast from.
         if (window_->windowState() & Qt::WindowFullScreen) return;
-        shadow_->setTopLeftTile(tiles_[0]);
-        shadow_->setTopTile(tiles_[1]);
-        shadow_->setTopRightTile(tiles_[2]);
-        shadow_->setRightTile(tiles_[3]);
-        shadow_->setBottomRightTile(tiles_[4]);
-        shadow_->setBottomTile(tiles_[5]);
-        shadow_->setBottomLeftTile(tiles_[6]);
-        shadow_->setLeftTile(tiles_[7]);
-        shadow_->setPadding(padding_);
+        active_ = window_->isActiveWindow();
+        const ShadowTexture &t =
+            (active_ || !Settings::instance().separateInactiveShadow()) ? active_tex_
+                                                                       : inactive_tex_;
+        if (t.none) return;
+        shadow_->setTopLeftTile(t.tiles[0]);
+        shadow_->setTopTile(t.tiles[1]);
+        shadow_->setTopRightTile(t.tiles[2]);
+        shadow_->setRightTile(t.tiles[3]);
+        shadow_->setBottomRightTile(t.tiles[4]);
+        shadow_->setBottomTile(t.tiles[5]);
+        shadow_->setBottomLeftTile(t.tiles[6]);
+        shadow_->setLeftTile(t.tiles[7]);
+        shadow_->setPadding(t.padding);
         shadow_->setWindow(handle_);
         shadow_->create();
     }
@@ -425,9 +497,10 @@ private:
     QWidget *window_;
     QPointer<QWindow> handle_;
     KWindowShadow *shadow_;
-    KWindowShadowTile::Ptr tiles_[8];
-    QMargins padding_;
-    bool none_ = true;
+    ShadowTexture active_tex_;
+    ShadowTexture inactive_tex_;
+    QString key_;
+    bool active_ = true;
 };
 
 // KWin's blur behind the translucent background -- the frosted look every

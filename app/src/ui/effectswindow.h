@@ -183,6 +183,11 @@ private:
     LevelMeter *noiseIn_ = nullptr;
     LevelMeter *noiseOut_ = nullptr;
     ToggleSwitch *micStereo_ = nullptr;
+    QLabel *captureLayoutLabel_ = nullptr;
+    QComboBox *captureMode_ = nullptr;
+    QWidget *stereoMonitorControls_ = nullptr;
+    QSlider *monitorLaneVolume_[2]{};
+    ToggleSwitch *monitorLaneEnabled_[2]{};
     ToggleSwitch *lowCut_ = nullptr;
     QComboBox *lowCutHz_ = nullptr;
     ToggleSwitch *eq_ = nullptr;
@@ -280,6 +285,7 @@ private:
     static MicDynamicsInfo dynamicsFromStage(const StageControls &ui);
 
     QString channelId_;
+    QString inputMeterBase_;
     MixerClient *client_ = nullptr;
     QTabWidget *tabs_ = nullptr;
     QComboBox *inputEffectSource_ = nullptr;

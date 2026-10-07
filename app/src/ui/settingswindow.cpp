@@ -257,6 +257,29 @@ QWidget *SettingsWindow::buildLatencyTab() {
         page));
     lay->addWidget(rt);
 
+    auto *nc = new Section(tr("Noise suppression"), page);
+    auto *ncLay = nc->contentLayout();
+    ncAutoPauseCheck_ = new QCheckBox(
+        tr("Pause noise suppression while nothing is listening"), page);
+    // Checked first for the same reason as the real-time box: it is the
+    // setting's default, and an absent daemon should not read as "off".
+    ncAutoPauseCheck_->setChecked(true);
+    connect(ncAutoPauseCheck_, &QCheckBox::toggled, this,
+            &SettingsWindow::onNcAutoPauseToggled);
+    ncLay->addWidget(ncAutoPauseCheck_);
+    ncLay->addWidget(dimLabel(
+        tr("Saves CPU when no application is recording a Waveline microphone "
+           "or the Stream mix, you are not monitoring a processed microphone, "
+           "and no ducking is keyed from one. It resumes the moment an "
+           "application starts recording. Your noise suppression switches are "
+           "not changed."),
+        page));
+    ncAutoPauseStatus_ = dimLabel(QString(), page);
+    ncLay->addWidget(ncAutoPauseStatus_);
+    lay->addWidget(nc);
+    // The pause comes and goes with applications, not with this window.
+    connect(client_, &MixerClient::changed, this, &SettingsWindow::syncNcAutoPause);
+
     lay->addStretch(1);
     return page;
 }
@@ -427,6 +450,22 @@ void SettingsWindow::onDspProfilingToggled(bool on) {
     // as a control that does nothing.
     if (measurementsWindow_ && measurementsWindow_->isVisible())
         measurementsWindow_->refreshNow();
+}
+
+void SettingsWindow::onNcAutoPauseToggled(bool on) {
+    if (syncing_ || !ncAutoPauseCheck_) return;
+    if (on == client_->autoPauseNoiseSuppression()) return;
+    client_->setAutoPauseNoiseSuppression(on);
+}
+
+void SettingsWindow::syncNcAutoPause() {
+    if (!ncAutoPauseCheck_ || !client_->available()) return;
+    syncing_ = true;
+    ncAutoPauseCheck_->setChecked(client_->autoPauseNoiseSuppression());
+    syncing_ = false;
+    ncAutoPauseStatus_->setText(client_->noiseSuppressionPaused()
+                                    ? tr("Paused now: nothing is listening.")
+                                    : tr("Running now."));
 }
 
 void SettingsWindow::syncDspProfilingCheck() {
@@ -842,6 +881,7 @@ void SettingsWindow::refresh() {
     syncHeadroomCombo();
     syncRealtimeCheck();
     syncDspProfilingCheck();
+    syncNcAutoPause();
     refreshWarnings();
     refreshServices();
 }

@@ -271,6 +271,16 @@ NoiseFilter *MixerGraph::channelNoiseFilter(const std::string &channelId,
     return it->second.outputNcReady ? it->second.outputNc.get() : nullptr;
 }
 
+void MixerGraph::setMicNoiseIdle(bool idle) {
+    micNoiseIdle_ = idle;
+    for (auto &bus : masterBuses_)
+        if (bus.chain.nc) bus.chain.nc->setIdle(idle);
+    for (auto &[id, chain] : chChains_) {
+        (void)id;
+        if (chain.inputNc) chain.inputNc->setIdle(idle);
+    }
+}
+
 bool MixerGraph::setNoiseEngine(NoiseEngine engine, std::string &error) {
     requestedEngine_ = engine;
 
@@ -305,6 +315,7 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
     const std::string &id = bus.id;
     const bool primary = isPrimaryMaster(id);
     const bool midi = isMasterMidi(bus);
+    bus.captureChannels = captureWidth(bus);
 
     if (midi) {
         chain.synth = std::make_unique<FluidSynthFilter>();
@@ -323,12 +334,13 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     } else {
         chain.selector = std::make_unique<CaptureSelector>();
+        chain.selector->setMode(bus.captureMode);
         std::string selectorErr;
         if (chain.selector->start(
                 masterCaptureSelectorNode(id),
                 disp(primary ? "Microphone Capture Selector"
                              : bus.name + " Capture Selector"),
-                selectorErr)) {
+                selectorErr, bus.captureChannels)) {
             chain.selectorReady = true;
         } else {
             error = "capture selector for " + id + ": " + selectorErr;
@@ -343,7 +355,7 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
         std::string gainErr;
         if (chain.gain->start(masterGainNode(id),
                               disp(primary ? "Microphone Gain" : bus.name + " Gain"),
-                              1, gainErr))
+                              bus.captureChannels, gainErr))
             chain.gainReady = true;
         else
             chain.gain.reset();
@@ -356,10 +368,12 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
         if (chain.nc->start(masterNcNode(id),
                             disp(primary ? "Microphone (Noise Suppressed)"
                                          : bus.name + " (Noise Suppressed)"),
-                            ncError, false, engine_))
+                            ncError, false, engine_, bus.captureChannels)) {
             chain.ncReady = true;
-        else
+            chain.nc->setIdle(micNoiseIdle_);
+        } else {
             chain.nc.reset();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 
@@ -367,7 +381,7 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
     std::string fxErr;
     if (chain.fx->start(masterFxNode(id),
                         disp(primary ? "Microphone EQ" : bus.name + " EQ"),
-                        1, fxErr))
+                        bus.captureChannels, fxErr))
         chain.fxReady = true;
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
@@ -376,7 +390,7 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
     if (chain.creative->start(masterCreativeNode(id),
                               disp(primary ? "Microphone Creative FX"
                                            : bus.name + " Creative FX"),
-                              1, creativeErr))
+                              bus.captureChannels, creativeErr))
         chain.creativeReady = true;
     else
         chain.creative.reset();
@@ -386,7 +400,7 @@ bool MixerGraph::createMasterChainNodes(MasterBusRuntime &bus,
     std::string dynErr;
     if (chain.dyn->start(masterDynNode(id),
                          disp(primary ? "Microphone Dynamics" : bus.name + " Dynamics"),
-                         1, dynErr))
+                         bus.captureChannels, dynErr))
         chain.dynReady = true;
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
@@ -403,7 +417,7 @@ bool MixerGraph::createMasterVirtualSource(MasterBusRuntime &bus, std::string &e
     if (eng_.addVirtualSource(masterSourceNode(bus.id),
                               disp(primary ? "Microphone (Processed)"
                                            : bus.name + " (Processed)"),
-                              1, srcErr)) {
+                              bus.captureChannels, srcErr)) {
         chain.sourceReady = true;
         return true;
     }
@@ -446,8 +460,8 @@ bool MixerGraph::buildPrimaryMasterPaths(std::string &error) {
         spec.target = (mix == Mix::Stream) ? kStreamMix : kMonitorMix;
         spec.description = (mix == Mix::Stream) ? "Microphone → Stream"
                                                 : "Microphone → Monitor";
-        spec.inChannels = primary->micStereo ? 2 : 1;
-        spec.outChannels = primary->micStereo ? 2 : 1;
+        spec.inChannels = primary->stereoMix() ? 2 : 1;
+        spec.outChannels = primary->stereoMix() ? 2 : 1;
         spec.remix = false;
         spec.source.clear();
         spec.sourceIsSink = false;
@@ -479,7 +493,7 @@ bool MixerGraph::startChannelChain(const std::string &id, const std::string &lab
     std::string sendErr;
     chain.micSend = std::make_unique<GainFilter>();
     if (chain.micSend->start(micSendNodeName(id),
-                             disp(label + " Mic Send"), 1, sendErr)) {
+                             disp(label + " Mic Send"), 2, sendErr)) {
         chain.micSendReady = true;
         chain.micSend->setGain(1.0f);
     } else {
@@ -630,99 +644,36 @@ bool MixerGraph::build(std::string &error, bool withNoiseSuppression) {
 bool MixerGraph::resolveMasterChain(const MasterBusRuntime &bus,
                                     std::string &dryNode, std::string &dryPort,
                                     std::string &fxNode, std::string &fxPort) const {
+    const auto &chain = bus.chain;
+    const auto &id = bus.id;
+    const std::string in = bus.captureChannels == 2 ? "input_FL" : "input";
+    const std::string out = bus.captureChannels == 2 ? "output_FL" : "output";
+    std::string node, port;
     if (isMasterMidi(bus)) {
-        if (!bus.chain.synthReady) return false;
-        const std::string &id = bus.id;
-        const std::string synthNode = masterSynthNode(id);
-        if (!eng_.hasPort(synthNode, "output", true)) return false;
-
-        const MasterBusChain &chain = bus.chain;
-        const std::string gainNode = masterGainNode(id);
-        const std::string ncNode = masterNcNode(id);
-        const std::string fxNodeName = masterFxNode(id);
-        const std::string creativeNode = masterCreativeNode(id);
-        const std::string dynNode = masterDynNode(id);
-
-        std::string srcNode = synthNode;
-        std::string srcPort = "output";
-        if (chain.gainReady && eng_.hasPort(gainNode, "input", false)) {
-            srcNode = gainNode;
-            srcPort = "output";
-        }
-        dryNode = srcNode;
-        dryPort = srcPort;
-
-        if (chain.ncReady && eng_.hasPort(ncNode, "input", false)) {
-            srcNode = ncNode;
-            srcPort = "output";
-        }
-        if (chain.fxReady && eng_.hasPort(fxNodeName, "input", false)) {
-            srcNode = fxNodeName;
-            srcPort = "output";
-        }
-        if (chain.creativeReady && eng_.hasPort(creativeNode, "input", false)) {
-            srcNode = creativeNode;
-            srcPort = "output";
-        }
-        if (chain.dynReady && eng_.hasPort(dynNode, "input", false)) {
-            srcNode = dynNode;
-            srcPort = "output";
-        }
-        fxNode = srcNode;
-        fxPort = srcPort;
-        return true;
+        if (!chain.synthReady) return false;
+        node = masterSynthNode(id); port = "output";
+    } else {
+        if (bus.captureNode.empty()) return false;
+        node = chain.selectorReady ? masterCaptureSelectorNode(id) : bus.captureNode;
+        port = chain.selectorReady ? out : masterCapturePort(bus);
     }
-
-    if (bus.captureNode.empty()) return false;
-
-    const MasterBusChain &chain = bus.chain;
-    const std::string &id = bus.id;
-    const std::string gainNode = masterGainNode(id);
-    const std::string ncNode = masterNcNode(id);
-    const std::string fxNodeName = masterFxNode(id);
-    const std::string creativeNode = masterCreativeNode(id);
-    const std::string dynNode = masterDynNode(id);
-
-    std::string srcNode = bus.captureNode;
-    std::string srcPort = masterCapturePort(bus);
-    if (chain.selectorReady) {
-        srcNode = masterCaptureSelectorNode(id);
-        srcPort = "output";
-        if (!eng_.hasPort(srcNode, srcPort, true)) return false;
-    } else if (!eng_.hasPort(srcNode, srcPort, true)) {
-        return false;
-    }
-    if (chain.gainReady && eng_.hasPort(gainNode, "input", false)) {
-        srcNode = gainNode;
-        srcPort = "output";
-    }
-    dryNode = srcNode;
-    dryPort = srcPort;
-
-    if (chain.ncReady && eng_.hasPort(ncNode, "input", false)) {
-        srcNode = ncNode;
-        srcPort = "output";
-    }
-    if (chain.fxReady && eng_.hasPort(fxNodeName, "input", false)) {
-        srcNode = fxNodeName;
-        srcPort = "output";
-    }
-    if (chain.creativeReady && eng_.hasPort(creativeNode, "input", false)) {
-        srcNode = creativeNode;
-        srcPort = "output";
-    }
-    if (chain.dynReady && eng_.hasPort(dynNode, "input", false)) {
-        srcNode = dynNode;
-        srcPort = "output";
-    }
-    fxNode = srcNode;
-    fxPort = srcPort;
+    if (!eng_.hasPort(node, port, true)) return false;
+    auto advance = [&](bool ready, const std::string &next) {
+        if (ready && eng_.hasPort(next, in, false)) { node = next; port = out; }
+    };
+    advance(chain.gainReady, masterGainNode(id));
+    dryNode = node; dryPort = port;
+    advance(chain.ncReady, masterNcNode(id));
+    advance(chain.fxReady, masterFxNode(id));
+    advance(chain.creativeReady, masterCreativeNode(id));
+    advance(chain.dynReady, masterDynNode(id));
+    fxNode = node; fxPort = port;
     return true;
 }
 
 bool MixerGraph::masterHwFirstHop(const MasterBusRuntime &bus, std::string &inNode,
                                   std::string &inPort) const {
-    inPort = "input";
+    inPort = bus.captureChannels == 2 ? "input_FL" : "input";
     if (bus.chain.gainReady) {
         inNode = masterGainNode(bus.id);
         return true;
@@ -768,12 +719,13 @@ bool MixerGraph::selectMasterCaptureInput(MasterBusRuntime &bus,
     }
 
     const std::string selectorNode = masterCaptureSelectorNode(bus.id);
-    const std::string selectorPort = CaptureSelector::inputPort(index);
+    for (int ch = 0; ch < bus.captureChannels; ++ch) {
+    const std::string selectorPort = CaptureSelector::inputPort(index, ch);
     if (!eng_.waitForPort(selectorNode, selectorPort, false, 1000)) {
         error = "capture selector input not ready for " + bus.id;
         return false;
     }
-    const std::string capturePort = masterCapturePort(bus);
+    const std::string capturePort = masterCapturePort(bus, ch);
     if (!eng_.hasPort(bus.captureNode, capturePort, true) &&
         !eng_.waitForPort(bus.captureNode, capturePort, true, 1000)) {
         error = "capture port not ready on " + bus.captureNode;
@@ -782,6 +734,8 @@ bool MixerGraph::selectMasterCaptureInput(MasterBusRuntime &bus,
     if (!eng_.linkPorts(bus.captureNode, capturePort, selectorNode, selectorPort,
                         error, /*asyncLink=*/true))
         return false;
+
+    }
 
     // The new hardware edge is active before selection changes. Existing
     // capture links remain untouched, avoiding the PipeWire clock stall caused
@@ -865,7 +819,12 @@ bool MixerGraph::rebuildMasterHwCapture(const std::string &id, std::string &erro
     float preservedGain = 1.0f;
     if (bus->chain.gainReady && bus->chain.gain)
         preservedGain = bus->chain.gain->gain();
+    const bool oldStereoMix = bus->stereoMix();
     const bool wantNc = bus->chain.ncReady;
+    const auto fx = bus->chain.fx ? bus->chain.fx->settings() : ChannelFxSettings{};
+    const auto dyn = bus->chain.dyn ? bus->chain.dyn->settings() : DynamicsSettings{};
+    const auto creative = bus->chain.creative ? bus->chain.creative->settings() : CreativeFxSettings{};
+    const bool ncEnabled = bus->chain.nc && bus->chain.nc->enabled();
 
     if (!bus->captureNode.empty())
         eng_.forgetLinksForNode(bus->captureNode);
@@ -876,11 +835,18 @@ bool MixerGraph::rebuildMasterHwCapture(const std::string &id, std::string &erro
     eng_.sync();
 
     if (!createMasterChainNodes(*bus, wantNc, error)) return false;
+    if (oldStereoMix != bus->stereoMix()) {
+        eng_.removePath(pathName(id, Mix::Monitor));
+        eng_.removePath(pathName(id, Mix::Stream));
+    }
     if (!createMasterVirtualSource(*bus, error)) return false;
-    if (!wireMasterPaths(id, error)) return false;
+    if (bus->chain.fx) bus->chain.fx->setSettings(fx);
+    if (bus->chain.dyn) bus->chain.dyn->setSettings(dyn);
+    if (bus->chain.creative) bus->chain.creative->setSettings(creative);
+    if (bus->chain.nc) bus->chain.nc->setEnabled(ncEnabled);
     if (bus->chain.gainReady && bus->chain.gain)
         bus->chain.gain->setGain(preservedGain);
-    return true;
+    return wireMasterPaths(id, error);
 }
 
 bool MixerGraph::rebuildAllMasterHwCaptures(std::string &error) {
@@ -926,6 +892,11 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
         syncMasterCaptureNode(*bus);
     }
 
+    if (!isMasterMidi(*bus) && !bus->captureNode.empty() &&
+        captureWidth(*bus) != bus->captureChannels) {
+        return rebuildMasterHwCapture(id, error);
+    }
+
     if (isMasterMidi(*bus)) {
         if (!bus->chain.synthReady) {
             error = "MIDI synth not ready for " + id;
@@ -954,7 +925,7 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
         const bool primary = isPrimaryMaster(id);
         if (bus->chain.gain->start(masterGainNode(id),
                                    disp(primary ? "Microphone Gain" : bus->name + " Gain"),
-                                   1, gainErr))
+                                   bus->captureChannels, gainErr))
             bus->chain.gainReady = true;
         else
             bus->chain.gain.reset();
@@ -996,6 +967,8 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
     }
     eng_.sync();
 
+    const std::string input = bus->captureChannels == 2 ? "input_FL" : "input";
+    const std::string output = bus->captureChannels == 2 ? "output_FL" : "output";
     std::string srcNode;
     std::string srcPort;
     if (isMasterMidi(*bus)) {
@@ -1008,7 +981,7 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
     } else {
         srcNode = bus->chain.selectorReady ? masterCaptureSelectorNode(id)
                                            : bus->captureNode;
-        srcPort = bus->chain.selectorReady ? "output" : masterCapturePort(*bus);
+        srcPort = bus->chain.selectorReady ? output : masterCapturePort(*bus);
     }
     // First hop from ALSA hardware must be async. A sync link pulls the mic's
     // capture clock into the shared graph driver; when an unrelated peer
@@ -1020,49 +993,56 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
                            const std::string &inPort) -> bool {
         const bool asyncHw = (srcNode == hwCapture);
         const int timeoutMs = isMasterMidi(*bus) ? 250 : 1000;
-        return eng_.linkPorts(srcNode, srcPort, inNode, inPort, error, asyncHw,
-                              timeoutMs);
+        if (!eng_.linkPorts(srcNode, srcPort, inNode, inPort, error, asyncHw, timeoutMs))
+            return false;
+        return bus->captureChannels == 1 ||
+            eng_.linkPorts(srcNode, rightPort(srcNode, srcPort), inNode, "input_FR",
+                           error, asyncHw, timeoutMs);
     };
     const int chainWaitMs = isMasterMidi(*bus) ? 400 : 3000;
 
     if (chain.gainReady &&
-        eng_.waitForPort(gainNode, "input", false, chainWaitMs)) {
-        if (!linkFromSrc(gainNode, "input"))
+        eng_.waitForPort(gainNode, input, false, chainWaitMs)) {
+        if (!linkFromSrc(gainNode, input))
             return false;
         srcNode = gainNode;
-        srcPort = "output";
+        srcPort = output;
     }
 
-    if (chain.ncReady && eng_.waitForPort(ncNode, "input", false, chainWaitMs)) {
-        if (!linkFromSrc(ncNode, "input"))
+    if (chain.ncReady && eng_.waitForPort(ncNode, input, false, chainWaitMs)) {
+        if (!linkFromSrc(ncNode, input))
             return false;
         srcNode = ncNode;
-        srcPort = "output";
+        srcPort = output;
     }
-    if (chain.fxReady && eng_.waitForPort(fxNodeName, "input", false, chainWaitMs)) {
-        if (!linkFromSrc(fxNodeName, "input"))
+    if (chain.fxReady && eng_.waitForPort(fxNodeName, input, false, chainWaitMs)) {
+        if (!linkFromSrc(fxNodeName, input))
             return false;
         srcNode = fxNodeName;
-        srcPort = "output";
+        srcPort = output;
     }
     if (chain.creativeReady &&
-        eng_.waitForPort(creativeNodeName, "input", false, chainWaitMs)) {
-        if (!linkFromSrc(creativeNodeName, "input"))
+        eng_.waitForPort(creativeNodeName, input, false, chainWaitMs)) {
+        if (!linkFromSrc(creativeNodeName, input))
             return false;
         srcNode = creativeNodeName;
-        srcPort = "output";
+        srcPort = output;
     }
     if (chain.dynReady &&
-        eng_.waitForPort(dynNodeName, "input", false, chainWaitMs)) {
-        if (!linkFromSrc(dynNodeName, "input"))
+        eng_.waitForPort(dynNodeName, input, false, chainWaitMs)) {
+        if (!linkFromSrc(dynNodeName, input))
             return false;
         srcNode = dynNodeName;
-        srcPort = "output";
+        srcPort = output;
     }
 
-    if (chain.sourceReady &&
-        eng_.waitForPort(srcNodeName, "input_MONO", false, chainWaitMs))
-        eng_.linkPorts(fxNode, fxPort, srcNodeName, "input_MONO", error);
+    const std::string sourceInput = bus->captureChannels == 2 ? "input_FL" : "input_MONO";
+    if (chain.sourceReady && eng_.waitForPort(srcNodeName, sourceInput, false, chainWaitMs)) {
+        if (!eng_.linkPorts(fxNode, fxPort, srcNodeName, sourceInput, error)) return false;
+        if (bus->captureChannels == 2 &&
+            !eng_.linkPorts(fxNode, rightPort(fxNode, fxPort), srcNodeName, "input_FR", error))
+            return false;
+    }
 
     if (isPrimaryMaster(id)) {
         if (!ensurePrimaryMasterPaths(*bus, error)) return false;
@@ -1087,9 +1067,9 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
                     continue;
                 }
                 eng_.sync();
-                if (bus->micStereo) {
+                if (bus->stereoMix()) {
                     linked = eng_.linkPorts(node, port, in, "input_FL", error) &&
-                             eng_.linkPorts(node, port, in, "input_FR", error);
+                             eng_.linkPorts(node, rightPort(node, port), in, "input_FR", error);
                 } else {
                     linked = eng_.linkPorts(node, port, in, "input_MONO", error);
                 }
@@ -1114,7 +1094,7 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
             spec.handle = monHandle;
             spec.target = kMonitorMix;
             spec.description = disp(bus->name + " → Monitor");
-            spec.inChannels = bus->micStereo ? 2 : 1;
+            spec.inChannels = bus->stereoMix() ? 2 : 1;
             spec.outChannels = 2;
             spec.remix = false;
             spec.source.clear();
@@ -1135,10 +1115,10 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
         const std::string capPort = eng_.pathCapturePort(streamHandle);
         bool streamLinked = false;
         if (eng_.waitForPort(streamIn, capPort, false, chainWaitMs)) {
-            if (bus->micStereo) {
+            if (bus->stereoMix()) {
                 streamLinked =
                     eng_.linkPorts(fxNode, fxPort, streamIn, "input_FL", error) &&
-                    eng_.linkPorts(fxNode, fxPort, streamIn, "input_FR", error);
+                    eng_.linkPorts(fxNode, rightPort(fxNode, fxPort), streamIn, "input_FR", error);
             } else {
                 streamLinked =
                     eng_.linkPorts(fxNode, fxPort, streamIn, "input_MONO", error);
@@ -1157,11 +1137,11 @@ bool MixerGraph::wireMasterPaths(const std::string &id, std::string &error) {
                 const std::string monCapPort = eng_.pathCapturePort(monHandle);
                 bool monitorLinked = false;
                 if (eng_.waitForPort(monIn, monCapPort, false, chainWaitMs)) {
-                    if (bus->micStereo) {
+                    if (bus->stereoMix()) {
                         monitorLinked =
                             eng_.linkPorts(monitorNode, monitorPort, monIn, "input_FL",
                                            error) &&
-                            eng_.linkPorts(monitorNode, monitorPort, monIn, "input_FR",
+                            eng_.linkPorts(monitorNode, rightPort(monitorNode, monitorPort), monIn, "input_FR",
                                            error);
                     } else {
                         monitorLinked = eng_.linkPorts(monitorNode, monitorPort, monIn,
@@ -1255,9 +1235,9 @@ bool MixerGraph::verifyMasterMixWiring(const std::string &id, std::string &error
             return false;
         }
         const std::string streamHandle = pathName(id, Mix::Stream);
-        if (!needPathLinks(streamHandle, bus->micStereo)) return false;
+        if (!needPathLinks(streamHandle, bus->stereoMix())) return false;
         if (masterSoftwareMonitor(id)) {
-            if (!needPathLinks(masterMonitorPath(id), bus->micStereo)) return false;
+            if (!needPathLinks(masterMonitorPath(id), bus->stereoMix())) return false;
         }
         return true;
     }
@@ -1266,12 +1246,12 @@ bool MixerGraph::verifyMasterMixWiring(const std::string &id, std::string &error
 
     const std::string streamHandle =
         isPrimaryMaster(id) ? pathName("mic", Mix::Stream) : pathName(id, Mix::Stream);
-    if (!needPathLinks(streamHandle, bus->micStereo)) return false;
+    if (!needPathLinks(streamHandle, bus->stereoMix())) return false;
 
     if (masterSoftwareMonitor(id)) {
         const std::string monHandle =
             isPrimaryMaster(id) ? pathName("mic", Mix::Monitor) : masterMonitorPath(id);
-        if (!needPathLinks(monHandle, bus->micStereo)) return false;
+        if (!needPathLinks(monHandle, bus->stereoMix())) return false;
     }
     return true;
 }
@@ -1345,8 +1325,8 @@ bool MixerGraph::ensurePrimaryMasterPaths(const MasterBusRuntime &bus,
         spec.target = (mix == Mix::Stream) ? kStreamMix : kMonitorMix;
         spec.description = (mix == Mix::Stream) ? "Microphone → Stream"
                                                 : "Microphone → Monitor";
-        spec.inChannels = bus.micStereo ? 2 : 1;
-        spec.outChannels = bus.micStereo ? 2 : 1;
+        spec.inChannels = bus.stereoMix() ? 2 : 1;
+        spec.outChannels = bus.stereoMix() ? 2 : 1;
         spec.remix = false;
         spec.source.clear();
         spec.sourceIsSink = false;
@@ -1517,97 +1497,51 @@ void MixerGraph::wireChannelMicSource(const std::string &channelId) {
             if (master->captureNode.empty()) continue;
             s.node = mchain.selectorReady ? masterCaptureSelectorNode(master->id)
                                           : master->captureNode;
-            s.port = mchain.selectorReady ? "output" : masterCapturePort(*master);
+            s.port = mchain.selectorReady
+                ? (master->captureChannels == 2 ? "output_FL" : "output")
+                : masterCapturePort(*master);
             s.hw = (s.node == master->captureNode);
         }
         // Past the device's own input gain, so the channel hears it at the level
         // its strip is set to. Same hop wireMasterPaths takes.
         const std::string mgainNode = masterGainNode(master->id);
-        if (mchain.gainReady && eng_.hasPort(mgainNode, "output", true)) {
+        if (mchain.gainReady && eng_.hasPort(mgainNode, master->captureChannels == 2 ? "output_FL" : "output", true)) {
             s.node = mgainNode;
-            s.port = "output";
+            s.port = master->captureChannels == 2 ? "output_FL" : "output";
             s.hw = false;
         }
         sources.push_back(std::move(s));
     }
     if (sources.empty()) return;
 
-    std::string src = sources.front().node;
-    std::string port = sources.front().port;
-    bool srcIsHw = sources.front().hw;
-    // False until a stage of this channel's own chain has been linked; up to
-    // that point every device feeds the port, after it there is one source.
+    std::string src, left;
     bool advanced = false;
     std::string err;
-    auto linkFromSrc = [&](const std::string &inNode,
-                           const std::string &inPort) -> bool {
-        if (advanced) return eng_.linkPorts(src, port, inNode, inPort, err, srcIsHw);
-        bool any = false;
-        for (const MicSource &s : sources)
-            if (eng_.linkPorts(s.node, s.port, inNode, inPort, err, s.hw)) any = true;
-        return any;
-    };
-    auto advanceTo = [&](const std::string &node, const std::string &outPort) {
-        src = node;
-        port = outPort;
-        srcIsHw = false;
-        advanced = true;
-    };
-    const std::string gainNode = micSendNodeName(channelId);
-    if (chain.micSendReady && eng_.hasPort(gainNode, "input", false) &&
-        eng_.hasPort(gainNode, "output", true)) {
-        if (linkFromSrc(gainNode, "input")) advanceTo(gainNode, "output");
-    }
-    if (!deviceFx && !anyMidi && chain.inputNcReady &&
-        eng_.hasPort(ncNode, "input", false) && eng_.hasPort(ncNode, "output", true)) {
-        if (linkFromSrc(ncNode, "input")) advanceTo(ncNode, "output");
-    }
-    if (!deviceFx && chain.inputFxReady && eng_.hasPort(fxNode, "input_FL", false)) {
-        linkFromSrc(fxNode, "input_FL");
-        // Right channel only needs async when still on hardware (mono capture
-        // duplicated); after mic-send/gain, stay sync with the left hop.
-        linkFromSrc(fxNode, "input_FR");
-        advanceTo(fxNode, "output_FL");
-    }
-    if (!deviceFx && chain.inputCreativeReady &&
-        eng_.hasPort(creativeNode, "input_FL", false)) {
-        if (src == fxNode) {
-            eng_.linkPorts(fxNode, "output_FL", creativeNode, "input_FL", err);
-            eng_.linkPorts(fxNode, "output_FR", creativeNode, "input_FR", err);
-        } else {
-            linkFromSrc(creativeNode, "input_FL");
-            linkFromSrc(creativeNode, "input_FR");
+    auto linkPair = [&](const std::string &inNode) -> bool {
+        if (advanced) {
+            return eng_.linkPorts(src, left, inNode, "input_FL", err) &&
+                   eng_.linkPorts(src, rightPort(src, left), inNode, "input_FR", err);
         }
-        advanceTo(creativeNode, "output_FL");
-    }
-    if (!deviceFx && chain.inputDynReady && eng_.hasPort(dynNode, "input_FL", false)) {
-        if (src == fxNode || src == creativeNode) {
-            eng_.linkPorts(src, "output_FL", dynNode, "input_FL", err);
-            eng_.linkPorts(src, "output_FR", dynNode, "input_FR", err);
-        } else {
-            linkFromSrc(dynNode, "input_FL");
-            linkFromSrc(dynNode, "input_FR");
+        bool linked = false;
+        for (const auto &source : sources) {
+            const bool l = eng_.linkPorts(source.node, source.port, inNode, "input_FL", err, source.hw);
+            const bool r = eng_.linkPorts(source.node, rightPort(source.node, source.port),
+                                          inNode, "input_FR", err, source.hw);
+            linked |= l && r;
         }
-        advanceTo(dynNode, "output_FL");
-    }
-
-    const std::string tailNode = src;
-    const bool tailStereo =
-        (tailNode == fxNode || tailNode == creativeNode || tailNode == dynNode);
-
-    // A mono tail feeds both sides. Without this the publish step only ran for a
-    // stereo tail, so a mic chain that ends mono -- which is every chain in
-    // "use device effects", and any chain whose stereo stages are switched off
-    // -- published silence.
-    auto linkTailTo = [&](const std::string &inNode) {
-        if (tailStereo) {
-            eng_.linkPorts(tailNode, "output_FL", inNode, "input_FL", err);
-            eng_.linkPorts(tailNode, "output_FR", inNode, "input_FR", err);
-            return;
-        }
-        linkFromSrc(inNode, "input_FL");
-        linkFromSrc(inNode, "input_FR");
+        return linked;
     };
+    auto stage = [&](bool ready, const std::string &node) {
+        if (ready && eng_.hasPort(node, "input_FL", false) && linkPair(node)) {
+            src = node; left = "output_FL"; advanced = true;
+        }
+    };
+    stage(chain.micSendReady, micSendNodeName(channelId));
+    stage(!deviceFx && !anyMidi && chain.inputNcReady, ncNode);
+    stage(!deviceFx && chain.inputFxReady, fxNode);
+    stage(!deviceFx && chain.inputCreativeReady, creativeNode);
+    stage(!deviceFx && chain.inputDynReady, dynNode);
+    auto linkTailTo = [&](const std::string &node) { return linkPair(node); };
 
     const std::string pub = micSourceNode(channelId);
     if (eng_.waitForPort(pub, "input_FL", false, 3000)) linkTailTo(pub);
@@ -1922,7 +1856,7 @@ bool MixerGraph::rewireMasterSoftwareMonitor(const std::string &id, std::string 
 
     const std::string monHandle = masterMonitorPath(id);
     const std::string monIn = monHandle + "-in";
-    if (bus->micStereo) {
+    if (bus->stereoMix()) {
         eng_.forgetLinksTo(monIn, "input_FL");
         eng_.forgetLinksTo(monIn, "input_FR");
     } else {
@@ -1935,7 +1869,7 @@ bool MixerGraph::rewireMasterSoftwareMonitor(const std::string &id, std::string 
     // leave before creating its replacement.
     for (int attempt = 0; attempt < 40; ++attempt) {
         const bool oldLinkPresent =
-            bus->micStereo
+            bus->stereoMix()
                 ? (eng_.hasManualLinkTo(monIn, "input_FL") ||
                    eng_.hasManualLinkTo(monIn, "input_FR"))
                 : eng_.hasManualLinkTo(monIn, "input_MONO");
@@ -1952,9 +1886,9 @@ bool MixerGraph::rewireMasterSoftwareMonitor(const std::string &id, std::string 
         return false;
     }
 
-    if (bus->micStereo) {
+    if (bus->stereoMix()) {
         return eng_.linkPorts(node, port, monIn, "input_FL", error) &&
-               eng_.linkPorts(node, port, monIn, "input_FR", error);
+               eng_.linkPorts(node, rightPort(node, port), monIn, "input_FR", error);
     }
     return eng_.linkPorts(node, port, monIn, "input_MONO", error);
 }
@@ -1978,7 +1912,7 @@ bool MixerGraph::rewireMicMonitor(std::string &error) {
     primary->chain.fxTailPort = fxPort;
 
     const std::string monIn = pathName("mic", Mix::Monitor) + "-in";
-    if (primary->micStereo) {
+    if (primary->stereoMix()) {
         eng_.forgetLinksTo(monIn, "input_FL");
         eng_.forgetLinksTo(monIn, "input_FR");
     } else {
@@ -1986,7 +1920,7 @@ bool MixerGraph::rewireMicMonitor(std::string &error) {
     }
     for (int attempt = 0; attempt < 40; ++attempt) {
         const bool oldLinkPresent =
-            primary->micStereo
+            primary->stereoMix()
                 ? (eng_.hasManualLinkTo(monIn, "input_FL") ||
                    eng_.hasManualLinkTo(monIn, "input_FR"))
                 : eng_.hasManualLinkTo(monIn, "input_MONO");
@@ -2003,9 +1937,9 @@ bool MixerGraph::rewireMicMonitor(std::string &error) {
         return false;
     }
 
-    if (primary->micStereo) {
+    if (primary->stereoMix()) {
         return eng_.linkPorts(node, port, monIn, "input_FL", error) &&
-               eng_.linkPorts(node, port, monIn, "input_FR", error);
+               eng_.linkPorts(node, rightPort(node, port), monIn, "input_FR", error);
     }
     return eng_.linkPorts(node, port, monIn, "input_MONO", error);
 }
@@ -2145,12 +2079,15 @@ void MixerGraph::linkDuckingSidechainSource(const std::string &duckNode, size_t 
         const std::string dyn = masterDynNode(masterId);
         const std::string fx = masterFxNode(masterId);
         const std::string gain = masterGainNode(masterId);
-        if (mc.dynReady && eng_.hasPort(dyn, "output", true)) {
-            eng_.linkPorts(dyn, "output", duckNode, port, err);
-        } else if (mc.fxReady && eng_.hasPort(fx, "output", true)) {
-            eng_.linkPorts(fx, "output", duckNode, port, err);
-        } else if (mc.gainReady && eng_.hasPort(gain, "output", true)) {
-            eng_.linkPorts(gain, "output", duckNode, port, err);
+        const std::string out = bus->captureChannels == 2 ? "output_FL" : "output";
+        std::string node;
+        if (mc.dynReady && eng_.hasPort(dyn, out, true)) node = dyn;
+        else if (mc.fxReady && eng_.hasPort(fx, out, true)) node = fx;
+        else if (mc.gainReady && eng_.hasPort(gain, out, true)) node = gain;
+        if (!node.empty()) {
+            eng_.linkPorts(node, out, duckNode, port, err);
+            if (bus->captureChannels == 2)
+                eng_.linkPorts(node, "output_FR", duckNode, port, err);
         }
         break;
     }
@@ -2213,12 +2150,13 @@ bool MixerGraph::ensureChannelNoiseFilter(const std::string &channelId, FxStage 
         chain.inputNc = std::make_unique<NoiseFilter>();
         if (!chain.inputNc->start(ncNodeName(channelId, FxStage::Input),
                                   disp(c->name + " Input NC"), err,
-                                  false, engine_)) {
+                                  false, engine_, 2)) {
             chain.inputNc.reset();
             return false;
         }
         chain.inputNcReady = true;
         chain.inputNc->setEnabled(false);
+        chain.inputNc->setIdle(micNoiseIdle_);
         return true;
     }
     chain.outputNc = std::make_unique<NoiseFilter>();
@@ -2355,9 +2293,10 @@ bool MixerGraph::ensureChannelMicSource(const std::string &channelId) {
         chain.inputNc = std::make_unique<NoiseFilter>();
         if (chain.inputNc->start(ncNodeName(channelId, FxStage::Input),
                                  disp(c->name + " Mic NC"), err,
-                                 false, engine_)) {
+                                 false, engine_, 2)) {
             chain.inputNcReady = true;
             chain.inputNc->setEnabled(false);
+            chain.inputNc->setIdle(micNoiseIdle_);
         } else {
             chain.inputNc.reset();
         }
@@ -2564,6 +2503,7 @@ void MixerGraph::applyMasterPathLevels(const std::string &id) {
     for (int i = 0; i < 2; ++i) {
         eng_.setPathVolume(streamHandle, bus->streamVolume);
         eng_.setPathMuted(streamHandle, bus->streamMuted);
+        eng_.setPathChannelGains(monHandle, bus->monitorLeft, bus->monitorRight);
         eng_.setPathVolume(monHandle, bus->monitorVolume);
         eng_.setPathMuted(monHandle, !sw || bus->monitorMuted);
         eng_.sync();
@@ -2628,7 +2568,7 @@ bool MixerGraph::ensureMidiStreamPath(const std::string &id, std::string &error)
     // tear it down when the width actually disagrees -- rebuilding a healthy
     // path on every profile load is what churns the graph on startup.
     if (eng_.pathExists(handle)) {
-        const std::string want = bus->micStereo ? "input_FL" : "input_MONO";
+        const std::string want = bus->stereoMix() ? "input_FL" : "input_MONO";
         if (eng_.pathCapturePort(handle) != want) eng_.removePath(handle);
     }
     return syncMasterStreamPath(id, error);
@@ -2656,7 +2596,7 @@ bool MixerGraph::syncMasterStreamPath(const std::string &id, std::string &error)
     spec.handle = handle;
     spec.target = kStreamMix;
     spec.description = disp(bus->name + " → Stream");
-    spec.inChannels = bus->micStereo ? 2 : 1;
+    spec.inChannels = bus->stereoMix() ? 2 : 1;
     spec.outChannels = 2;
     spec.remix = false;
     spec.source.clear();
@@ -2751,7 +2691,7 @@ bool MixerGraph::ensureChannelFilters(std::string &error) {
             chain.micSend = std::make_unique<GainFilter>();
             std::string sendErr;
             if (chain.micSend->start(micSendNodeName(c.id),
-                                     disp(c.name + " Mic Send"), 1, sendErr)) {
+                                     disp(c.name + " Mic Send"), 2, sendErr)) {
                 chain.micSendReady = true;
                 chain.micSend->setGain(c.micSend);
             } else {
@@ -2849,6 +2789,7 @@ bool MixerGraph::setMasterMicStereo(const std::string &id, bool on, std::string 
     }
     if (on == bus->micStereo) return true;
     bus->micStereo = on;
+    if (bus->captureChannels == 2) return true;
 
     if (isPrimaryMaster(id)) {
         eng_.removePath(pathName("mic", Mix::Stream));
@@ -3541,11 +3482,25 @@ bool MixerGraph::reconsiderMicNode() {
     return changed;
 }
 
-std::string MixerGraph::masterCapturePort(const MasterBusRuntime &bus) const {
-    if (bus.captureNode.empty()) return "capture_MONO";
+int MixerGraph::captureWidth(const MasterBusRuntime &bus) const {
+    if (isMasterMidi(bus)) return 1;
+    const std::string node = bus.captureNode.empty() ? findCaptureNode(bus.captureMatch) : bus.captureNode;
+    return eng_.hasPort(node, "capture_FL", true) && eng_.hasPort(node, "capture_FR", true) ? 2 : 1;
+}
+
+std::string MixerGraph::masterCapturePort(const MasterBusRuntime &bus, int channel) const {
+    if (eng_.hasPort(bus.captureNode, "capture_FL", true) &&
+        eng_.hasPort(bus.captureNode, "capture_FR", true))
+        return channel ? "capture_FR" : "capture_FL";
     if (eng_.hasPort(bus.captureNode, "capture_MONO", true)) return "capture_MONO";
     if (eng_.hasPort(bus.captureNode, "capture_FL", true)) return "capture_FL";
+    if (eng_.hasPort(bus.captureNode, "capture_FR", true)) return "capture_FR";
     return "capture_MONO";
+}
+
+std::string MixerGraph::rightPort(const std::string &, const std::string &left) const {
+    if (left.ends_with("_FL")) return left.substr(0, left.size() - 2) + "FR";
+    return left;
 }
 
 bool MixerGraph::isMasterMidi(const MasterBusRuntime &bus) const {
@@ -3679,7 +3634,7 @@ bool MixerGraph::linkPendingMidiAudioPaths(std::string &error) {
 
         auto pathReady = [&](const std::string &handle) {
             const std::string in = handle + "-in";
-            if (bus.micStereo)
+            if (bus.stereoMix())
                 return linkedTo(in, "input_FL") && linkedTo(in, "input_FR");
             return linkedTo(in, "input_MONO");
         };
