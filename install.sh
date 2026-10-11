@@ -99,6 +99,14 @@ ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
 warn() { printf '    \033[33mwarn\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[31mxx   %s\033[0m\n' "$*" >&2; exit 1; }
 
+# The packages in "$@" that are not installed yet, one per line. `pacman -S
+# --needed` only skips a package that is up to date: an installed one the
+# repo has moved past gets upgraded -- a partial upgrade, and on a system that
+# holds packages back (IgnorePkg, or a hook pinning the desktop's Qt) one that
+# is refused, taking every other package in the transaction down with it.
+# Asked of `pacman -T`, so a package provided under another name counts too.
+pacman_missing() { pacman -T "$@" 2>/dev/null || true; }
+
 APP_ONLY=0
 KERNEL_ONLY=0
 for arg in "$@"; do
@@ -785,14 +793,20 @@ arch)
 	# Asked of /proc/version, not the kbuild tree: the headers may be among
 	# the packages this very command is about to install.
 	grep -qs 'clang version' /proc/version && PKGS+=(clang llvm lld)
-	ok "pacman -S ${PKGS[*]}"
 	# Deliberately NO -y: "pacman -Sy <pkg>" is a partial upgrade and can break
 	# an Arch system. If the local DB is too old to find a package, tell the
-	# user to run a full -Syu themselves rather than doing it for them.
-	if ! pacman -S --needed --noconfirm "${PKGS[@]}"; then
-		warn "pacman could not install everything."
-		warn "  If a package was 'not found', your package DB is stale --"
-		warn "  run:  sudo pacman -Syu     then re-run this script."
+	# user to run a full -Syu themselves rather than doing it for them. Only
+	# what is missing is asked for, so nothing installed is upgraded either.
+	mapfile -t MISSING < <(pacman_missing "${PKGS[@]}")
+	if (( ${#MISSING[@]} == 0 )); then
+		ok "already installed: ${PKGS[*]}"
+	else
+		ok "pacman -S ${MISSING[*]}"
+		if ! pacman -S --needed --noconfirm "${MISSING[@]}"; then
+			warn "pacman could not install everything."
+			warn "  If a package was 'not found', your package DB is stale --"
+			warn "  run:  sudo pacman -Syu     then re-run this script."
+		fi
 	fi
 	# The mixer's build dependencies, installed separately from the list
 	# above and deliberately tolerant of failure: the kernel module, the
@@ -800,9 +814,14 @@ arch)
 	# was renamed upstream. If something here does not land, mixer_deps_ok
 	# reports exactly which piece is missing and the mixer step is skipped.
 	MIXER_PKGS=(cmake qt6-base qt6-svg qt6-websockets pipewire rnnoise)
-	ok "pacman -S ${MIXER_PKGS[*]}   (mixer)"
-	pacman -S --needed --noconfirm "${MIXER_PKGS[@]}" \
-	  || warn "not every mixer dependency installed -- step 8 will name the missing one"
+	mapfile -t MISSING < <(pacman_missing "${MIXER_PKGS[@]}")
+	if (( ${#MISSING[@]} == 0 )); then
+		ok "already installed: ${MIXER_PKGS[*]}   (mixer)"
+	else
+		ok "pacman -S ${MISSING[*]}   (mixer)"
+		pacman -S --needed --noconfirm "${MISSING[@]}" \
+		  || warn "not every mixer dependency installed -- step 8 will name the missing one"
+	fi
 	;;
 debian)
 	export DEBIAN_FRONTEND=noninteractive
