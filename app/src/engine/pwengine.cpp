@@ -120,6 +120,10 @@ struct PwEngine::Impl {
     // link-factory call actually connected before trusting manualLinks cache.
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> pipewireLinks;
     std::map<std::string, Path> paths;
+    // Paths held silent whatever their own mute says; see setPathCut(). By
+    // handle, so a path torn down and built again under the same handle comes
+    // back still cut.
+    std::set<std::string> cutPaths;
 
     mutable std::mutex nodesMutex;
     std::map<uint32_t, PwNode> nodes;
@@ -781,7 +785,9 @@ void onRegistryGlobal(void *data, uint32_t id, uint32_t /*permissions*/,
     // meantime is applied here, the moment the node shows up.
     for (auto &[handle, path] : impl->paths) {
         if (path.captureName == nodeName) {
-            applyVolumeLocked(impl, id, path);
+            Path eff = path;
+            if (impl->cutPaths.count(handle)) eff.muted = true;
+            applyVolumeLocked(impl, id, eff);
             break;
         }
     }
@@ -1374,8 +1380,28 @@ bool PwEngine::setPathVolume(const std::string &handle, float volume) {
         std::lock_guard<std::mutex> lock(d_->nodesMutex);
         found = d_->findNodeIdLocked(it->second.captureName, id);
     }
-    if (found) applyVolumeLocked(d_.get(), id, it->second);
+    if (found) {
+        Path eff = it->second;
+        if (d_->cutPaths.count(handle)) eff.muted = true;
+        applyVolumeLocked(d_.get(), id, eff);
+    }
     pw_thread_loop_unlock(d_->loop);
+    return true;
+}
+
+bool PwEngine::setPathCut(const std::string &handle, bool cut) {
+    // Under the loop's lock: the registry callback reads the set on
+    // PipeWire's thread when a path's node appears.
+    if (d_->loop) pw_thread_loop_lock(d_->loop);
+    const bool was = d_->cutPaths.count(handle) > 0;
+    if (cut) d_->cutPaths.insert(handle);
+    else d_->cutPaths.erase(handle);
+    if (d_->loop) pw_thread_loop_unlock(d_->loop);
+    if (was == cut) return false;
+    // Re-applied with the path's own volume and mute, now with the cut on top
+    // or taken off.
+    auto it = d_->paths.find(handle);
+    if (it != d_->paths.end()) setPathVolume(handle, it->second.volume);
     return true;
 }
 

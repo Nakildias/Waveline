@@ -10,6 +10,7 @@
 #include <spa/pod/builder.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <list>
@@ -19,15 +20,20 @@ namespace {
 
 constexpr uint32_t kRate = 48000;
 constexpr uint32_t kChannels = 2;
-// Decay applied on every read, so a peak stays visible for a few polls rather
-// than flickering with the quantum. ~1.5 dB per 100 ms read.
+// Decay, so a peak stays visible for a few polls rather than flickering with
+// the quantum: ~1.5 dB per 100 ms. By the time since the last read, not per
+// read, so how often anyone asks -- this window at 10 Hz, a desktop's meters
+// at frame rate, both at once -- does not change how long a peak lingers.
 constexpr float kDecay = 0.82f;
+constexpr double kDecayPeriodMs = 100.0;
 
 struct Watch {
     std::string key;
     pw_stream *stream = nullptr;
     spa_hook listener{};
     std::atomic<float> peak{0.0f};
+    // When levels() last decayed this peak. Only touched by the reader.
+    std::chrono::steady_clock::time_point lastRead = std::chrono::steady_clock::now();
     struct spa_audio_info_raw format {};
 };
 
@@ -149,6 +155,20 @@ bool LevelProbe::watch(const std::string &key, const std::string &sinkName,
         // A probe with nowhere to attach reads zero, and syncMasterMeters()
         // re-arms it when the node it wants exists.
         PW_KEY_NODE_DONT_RECONNECT, "true",
+        // And the same at the start. dont-reconnect only covers a target that
+        // goes away later: a probe created before its target exists is still
+        // linked to the policy's fallback straight away -- for a sink's
+        // monitor, the default sink. The Monitor mix's meter was found on
+        // waveline-ch-system that way, reading silence while everything played,
+        // until the daemon was restarted. dont-fallback makes WirePlumber wait
+        // for the node by name instead; without linger it destroys the stream
+        // rather than waiting.
+        "node.dont-fallback", "true",
+        "node.linger", "true",
+        // A target in the default metadata outranks target.object. Nothing
+        // should ever move a meter tap; unwatch() and watch() are how one is
+        // pointed somewhere else.
+        "node.dont-move", "true",
         nullptr);
 
     w.stream = pw_stream_new(d_->core, ("waveline-meter-" + key).c_str(), props);
@@ -184,12 +204,21 @@ bool LevelProbe::watch(const std::string &key, const std::string &sinkName,
 std::vector<std::pair<std::string, float>> LevelProbe::levels() const {
     std::vector<std::pair<std::string, float>> out;
     out.reserve(d_->watches.size());
+    const auto now = std::chrono::steady_clock::now();
     for (auto &w : d_->watches) {
         const float v = w.peak.load(std::memory_order_relaxed);
         out.emplace_back(w.key, v);
-        // Decayed on read rather than on a timer: the reader's cadence is what
-        // decides how long a peak should linger on screen.
-        w.peak.store(v * kDecay, std::memory_order_relaxed);
+        // Decayed on read rather than on a timer, so an idle daemon does no
+        // work -- but by the time that passed, not once per read.
+        const double ms =
+            std::chrono::duration<double, std::milli>(now - w.lastRead).count();
+        w.lastRead = now;
+        const float decay =
+            static_cast<float>(std::pow(static_cast<double>(kDecay), ms / kDecayPeriodMs));
+        // A compare-exchange, as onProcess() does, so a peak the process
+        // thread raised between the load and here is not overwritten.
+        float expected = v;
+        w.peak.compare_exchange_strong(expected, v * decay, std::memory_order_relaxed);
     }
     return out;
 }

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -338,6 +339,11 @@ public:
     }
     bool setMonitorOutputs(const std::vector<MonitorOutputEntry> &outputs,
                            std::string &error);
+    // Swaps two outputs' places in the list: the device, its level and mute,
+    // and its loopback all move together, so nothing is torn down or reloaded
+    // and neither device drops out. Only which number each one answers to
+    // changes.
+    bool swapMonitorOutputs(size_t a, size_t b);
     bool setMonitorOutputAt(size_t index, const std::string &sinkName, std::string &error);
     bool addMonitorOutput(const std::string &sinkName, std::string &error);
     bool removeMonitorOutput(size_t index, std::string &error);
@@ -354,6 +360,12 @@ public:
 
     bool setMonitorMasterVolume(float volume);
     bool setMonitorMasterMuted(bool muted);
+    // Holds every input device's monitor path silent, without touching what
+    // the user set: the ear toggles, the levels and the mutes all stay as
+    // they are and come back when the cut is lifted. Safe to call again with
+    // the same value -- an input added since is cut too. True when it
+    // changed what is audible.
+    bool setInputMonitorCut(bool cut);
     float monitorMasterVolume() const { return monitorMaster_; }
     // Re-push per-output Monitor levels (after rewire / restart settles).
     void applyAllMonitorOutputGains();
@@ -626,6 +638,9 @@ private:
     bool streamMixMuted_ = false;
     bool softwareMonitor_ = true;
     bool built_ = false;
+    // The monitor paths setInputMonitorCut() is holding, so lifting the cut
+    // also lets go of an input that has been removed since.
+    std::set<std::string> cutMonitorPaths_;
 };
 
 }  // namespace waveline

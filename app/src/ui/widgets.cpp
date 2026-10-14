@@ -3,11 +3,12 @@
 
 #include "widgets.h"
 
+#include <QHBoxLayout>
+
 #include <QLabel>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QAbstractItemView>
-#include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPropertyAnimation>
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "levelmeter.h"
 #include "theme.h"
 
 namespace {
@@ -139,6 +141,17 @@ Fader::Fader(QWidget *parent) : QSlider(Qt::Vertical, parent) {
 void Fader::setAccent(const QColor &c) { accent_ = c; update(); }
 void Fader::setMuted(bool muted) { muted_ = muted; update(); }
 
+void Fader::setTrackHidden(bool hidden) {
+    trackHidden_ = hidden;
+    update();
+}
+
+int Fader::travel() const { return std::max(1, height() - kHandleH); }
+
+QRectF Fader::trackRect(qreal w) const {
+    return QRectF(width() / 2.0 - w / 2.0, kHandleH / 2.0, w, height() - kHandleH);
+}
+
 QSize Fader::sizeHint() const { return {kFaderWidth, 150}; }
 QSize Fader::minimumSizeHint() const { return {kFaderWidth, 70}; }
 
@@ -201,12 +214,12 @@ void Fader::paintEvent(QPaintEvent *) {
     QRectF groove(cx - kGrooveW / 2.0, top, kGrooveW, bottom - top);
     QPainterPath gp;
     gp.addRoundedRect(groove, kGrooveW / 2.0, kGrooveW / 2.0);
-    p.fillPath(gp, Theme::Well);
+    if (!trackHidden_) p.fillPath(gp, Theme::Well);
 
     // Filled from the handle down. Dimmed rather than hidden when muted: the
     // fader still has a value, it is just not being heard.
     QRectF filled(groove.left(), y, kGrooveW, bottom - y);
-    if (filled.height() > 0) {
+    if (!trackHidden_ && filled.height() > 0) {
         QPainterPath fp;
         fp.addRoundedRect(filled, kGrooveW / 2.0, kGrooveW / 2.0);
         QColor c = isEnabled() ? accent_.get() : Theme::Inactive;
@@ -228,6 +241,69 @@ void Fader::paintEvent(QPaintEvent *) {
     // physical cap rather than a rectangle.
     p.setPen(QPen(QColor(0, 0, 0, 90), 1));
     p.drawLine(QPointF(h.left() + 3, y), QPointF(h.right() - 3, y));
+}
+
+namespace {
+
+// Keeps a meter under a fader's track.
+class TrackMeterBinder : public QObject {
+public:
+    // `track` answers where the track runs, in the slider's own coordinates.
+    TrackMeterBinder(QWidget *slider, LevelMeter *meter, std::function<QRectF()> track)
+        : QObject(slider), slider_(slider), meter_(meter), track_(std::move(track)) {
+        slider->installEventFilter(this);
+        sync();
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == slider_) {
+            switch (event->type()) {
+            case QEvent::Resize:
+            case QEvent::Move:
+            case QEvent::Show:
+            case QEvent::Hide:
+            case QEvent::ShowToParent:
+            case QEvent::HideToParent:
+                sync();
+                break;
+            default:
+                break;
+            }
+        }
+        return false;
+    }
+
+private:
+    void sync() {
+        meter_->setGeometry(track_().translated(slider_->pos()).toRect());
+        meter_->setVisible(!slider_->isHidden());
+        meter_->lower();
+    }
+
+    QWidget *slider_;
+    LevelMeter *meter_;
+    std::function<QRectF()> track_;
+};
+
+}  // namespace
+
+LevelMeter *attachTrackMeter(Fader *fader, int thickness) {
+    auto *meter = new LevelMeter(Qt::Vertical, fader->parentWidget());
+    meter->setThickness(thickness);
+    meter->setAttribute(Qt::WA_TransparentForMouseEvents);
+    fader->setTrackHidden(true);
+    new TrackMeterBinder(fader, meter, [fader, thickness] { return fader->trackRect(thickness); });
+    return meter;
+}
+
+LevelMeter *attachTrackMeter(TrackSlider *slider, int thickness) {
+    auto *meter = new LevelMeter(Qt::Horizontal, slider->parentWidget());
+    meter->setThickness(thickness);
+    meter->setAttribute(Qt::WA_TransparentForMouseEvents);
+    slider->setTrackHidden(true);
+    new TrackMeterBinder(slider, meter, [slider, thickness] { return slider->trackRect(thickness); });
+    return meter;
 }
 
 // ============================================================= TrackSlider
@@ -301,9 +377,57 @@ void TrackSlider::mouseReleaseEvent(QMouseEvent *e) {
     QSlider::mouseReleaseEvent(e);
 }
 
+void TrackSlider::setFaderStyle(bool on) {
+    faderStyle_ = on;
+    update();
+}
+
+void TrackSlider::setTrackHidden(bool hidden) {
+    trackHidden_ = hidden;
+    update();
+}
+
+QRectF TrackSlider::trackRect(qreal thickness) const {
+    // Where the handle's centre travels, end to end, `thickness` tall.
+    return QRectF(kTrackHandleW / 2.0, height() / 2.0 - thickness / 2.0,
+                  width() - kTrackHandleW, thickness);
+}
+
 void TrackSlider::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+
+    if (faderStyle_) {
+        // Sizes from the vertical Fader and its track meter, turned on their
+        // side: an 8 px track, an 8 x 18 cap with a seam down its middle.
+        constexpr qreal kTrack = 8.0;
+        constexpr qreal kCapW = 8.0;
+        constexpr qreal kCapH = 18.0;
+        const qreal cy = height() / 2.0;
+        const qreal x = handleX();
+        const QRectF track(kTrackHandleW / 2.0 - kTrack / 2.0, cy - kTrack / 2.0,
+                           width() - kTrackHandleW + kTrack, kTrack);
+        QPainterPath tp;
+        tp.addRoundedRect(track, kTrack / 2.0, kTrack / 2.0);
+        if (!trackHidden_) p.fillPath(tp, Theme::Well);
+        const QRectF filled(track.left(), track.top(), x - track.left(), kTrack);
+        if (!trackHidden_ && filled.width() > 0) {
+            QPainterPath fp;
+            fp.addRoundedRect(filled, kTrack / 2.0, kTrack / 2.0);
+            QColor c = isEnabled() ? accent_.get() : Theme::Inactive;
+            c.setAlpha(190);
+            p.fillPath(fp, c);
+        }
+        QColor cap = isEnabled() ? Theme::Fader : Theme::TextFaint;
+        if (isSliderDown() || hasFocus()) cap = cap.lighter(125);
+        const QRectF h(x - kCapW / 2.0, cy - kCapH / 2.0, kCapW, kCapH);
+        QPainterPath hp;
+        hp.addRoundedRect(h, 3, 3);
+        p.fillPath(hp, cap);
+        p.setPen(QPen(QColor(0, 0, 0, 90), 1));
+        p.drawLine(QPointF(x, h.top() + 3), QPointF(x, h.bottom() - 3));
+        return;
+    }
 
     const qreal cy = height() / 2.0;
     const qreal left = kTrackHandleW / 2.0;
@@ -774,6 +898,57 @@ void EqualToggle::paintEvent(QPaintEvent *) {
                  Theme::iconPixmap(QStringLiteral("equal"), fg, px));
 }
 
+// ================================================================== IconTile
+
+IconTile::IconTile(const QString &iconName, const QColor &color, QWidget *parent)
+    : QWidget(parent), icon_(iconName), color_(color) {
+    setFixedSize(28, 28);
+}
+
+void IconTile::setAppearance(const QString &iconName, const QColor &color) {
+    icon_ = iconName;
+    color_ = color;
+    update();
+}
+
+void IconTile::setOnClicked(std::function<void()> fn) {
+    onClick_ = std::move(fn);
+    setCursor(onClick_ ? Qt::PointingHandCursor : Qt::ArrowCursor);
+}
+
+void IconTile::paintEvent(QPaintEvent *) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    QPainterPath path;
+    path.addRoundedRect(QRectF(rect()), 8, 8);
+    p.fillPath(path, color_);
+    const int px = 18;
+    // Dark glyph on a pale tile: the icon has to stay readable whatever
+    // colour the card has been given.
+    p.drawPixmap(QPointF((width() - px) / 2.0, (height() - px) / 2.0),
+                 Theme::iconPixmap(icon_, Theme::glyphOn(color_), px));
+    // A hairline on hover, so the tile advertises that it does something
+    // without carrying a permanent border.
+    if (hover_ && onClick_) {
+        QColor ring = Theme::glyphOn(color_);
+        ring.setAlpha(150);
+        p.setPen(QPen(ring, 1.5));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75), 7, 7);
+    }
+}
+
+void IconTile::enterEvent(QEnterEvent *) { hover_ = true; update(); }
+void IconTile::leaveEvent(QEvent *) { hover_ = false; update(); }
+
+void IconTile::mousePressEvent(QMouseEvent *e) {
+    if (e->button() == Qt::LeftButton && onClick_) {
+        onClick_();
+        return;
+    }
+    QWidget::mousePressEvent(e);
+}
+
 // ================================================================== CardBase
 
 CardBase::CardBase(QWidget *parent) : QFrame(parent) { fill_ = Theme::Card; }
@@ -781,6 +956,7 @@ CardBase::CardBase(QWidget *parent) : QFrame(parent) { fill_ = Theme::Card; }
 void CardBase::setRadius(int r) { radius_ = r; update(); }
 void CardBase::setFillColor(const QColor &c) { fill_ = c; update(); }
 void CardBase::setTopStripe(const QColor &c) { stripe_ = c; update(); }
+void CardBase::setBorderColor(const QColor &c) { border_ = c; update(); }
 
 void CardBase::paintEvent(QPaintEvent *) {
     QPainter p(this);
@@ -796,6 +972,14 @@ void CardBase::paintEvent(QPaintEvent *) {
         p.fillRect(QRect(0, 0, width(), 3), stripe_);
         p.restore();
     }
+    if (border_.isValid()) {
+        // Inset half a pixel, so the 1px line lands on whole pixels and sits
+        // inside the card rather than half outside its rounded edge.
+        const QRectF edge = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        p.setPen(QPen(border_.get(), 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(edge, std::max(0.0, radius_ - 0.5), std::max(0.0, radius_ - 0.5));
+    }
 }
 
 // =================================================================== Section
@@ -805,12 +989,27 @@ Section::Section(const QString &title, QWidget *parent) : CardBase(parent) {
     lay->setContentsMargins(14, 12, 14, 14);
     lay->setSpacing(10);
     caption_ = caption(title, this);
-    lay->addWidget(caption_);
+    header_ = new QHBoxLayout;
+    header_->setContentsMargins(0, 0, 0, 0);
+    header_->setSpacing(8);
+    header_->addWidget(caption_, 1, Qt::AlignVCenter);
+    lay->addLayout(header_);
 
     content_ = new QVBoxLayout;
     content_->setContentsMargins(0, 0, 0, 0);
     content_->setSpacing(9);
     lay->addLayout(content_);
+}
+
+void Section::setLeadingWidget(QWidget *widget) {
+    if (!widget) return;
+    widget->setParent(this);
+    header_->insertWidget(0, widget, 0, Qt::AlignVCenter);
+}
+
+void Section::setCaptionCentered(bool centered) {
+    if (caption_)
+        caption_->setAlignment((centered ? Qt::AlignHCenter : Qt::AlignLeft) | Qt::AlignVCenter);
 }
 
 void Section::setTitle(const QString &title) {

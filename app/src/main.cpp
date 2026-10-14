@@ -10,6 +10,7 @@
 #include "ui/mainwindow.h"
 #include "ui/monarchy/desktop.h"
 #include "ui/monarchy/menus.h"
+#include "ui/monarchy/scroll_bars.h"
 #include "ui/theme.h"
 #include "version.h"
 
@@ -44,6 +45,8 @@ int main(int argc, char **argv) {
     Theme::apply();
     // On Monarchy, every menu and dropdown is the desktop's own.
     Monarchy::useShellMenus();
+    // And every scroll bar follows its Appearance -> Show scroll bars.
+    Monarchy::followScrollBarSetting();
 
     // --screenshot renders the window once and exits. Works under
     // QT_QPA_PLATFORM=offscreen, so the layout can be checked without a

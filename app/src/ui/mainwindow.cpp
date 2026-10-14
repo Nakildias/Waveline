@@ -7,8 +7,8 @@
 #include <QBrush>
 #include <QClipboard>
 #include <QComboBox>
+#include <QActionGroup>
 #include <QDialog>
-#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QGuiApplication>
 #include <QHeaderView>
@@ -19,7 +19,6 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QMimeData>
 #include <QPushButton>
 #include <QPainter>
 #include <QPainterPath>
@@ -40,11 +39,12 @@
 #include <cmath>
 
 #include "aboutwindow.h"
-#include "animatedpanel.h"
 #include "settingswindow.h"
 #include "cardidentity.h"
+#include "cardshuffle.h"
 #include "channelstrip.h"
 #include "creativerackwindow.h"
+#include "mixcard.h"
 #include "effectswindow.h"
 #include "levelmeter.h"
 #include "monarchy/chrome.h"
@@ -86,14 +86,30 @@ QLabel *dimLabel(const QString &text, QWidget *parent) {
     return l;
 }
 
-QPushButton *iconButton(const QString &icon, const QString &tip, QWidget *parent) {
-    auto *b = new QPushButton(parent);
-    b->setIcon(Theme::icon(icon, Theme::TextDim, 16));
-    b->setFixedSize(28, 24);
-    b->setFlat(true);
-    b->setToolTip(tip);
-    return b;
+// The cards that are not an input or a channel keep their looks in the same
+// table, under keys of their own. A Monitor mix's goes with its number, which
+// is what stays put when two are swapped.
+QString monitorMixCardKey(int index) {
+    return QStringLiteral("mix:monitor:%1").arg(index + 1);
 }
+const QString kStreamMixCardKey = QStringLiteral("mix:stream");
+const QString kAppSettingsCardKey = QStringLiteral("card:app-settings");
+
+// Defaults of their own, clear of the input and channel palettes, so a mix is
+// never mistaken for the card feeding it.
+QColor monitorMixColor(int index) {
+    static const QColor kPalette[] = {
+        QColor(0x14, 0xb8, 0xa6),  // 1 teal
+        QColor(0x7d, 0xd3, 0xfc),  // 2 pale sky
+        QColor(0xfb, 0x71, 0x85),  // 3 coral
+        QColor(0xd6, 0xb3, 0x70),  // 4 sand
+        QColor(0xc4, 0xb5, 0xfd),  // 5 lavender
+    };
+    const int n = static_cast<int>(sizeof(kPalette) / sizeof(kPalette[0]));
+    return kPalette[((index % n) + n) % n];
+}
+const QColor kStreamMixColor(0xfa, 0xcc, 0x15);    // yellow
+const QColor kAppSettingsColor(0x94, 0xa3, 0xb8);  // slate
 
 QPushButton *squareOverlayButton(const QString &icon, const QString &tip,
                                  QWidget *parent) {
@@ -105,81 +121,29 @@ QPushButton *squareOverlayButton(const QString &icon, const QString &tip,
     return b;
 }
 
-// Sideways label: the whole caption rotated, not letter-by-letter.
-class SidewaysCaption : public QWidget {
-public:
-    enum class Face { TowardTop, TowardBottom };
+// Cards in a group stand this far apart; the groups themselves -- mixes,
+// input devices, channels, Application Settings -- four times as far. Nothing
+// in the gap: the gap is the divider.
+constexpr int kCardSpacing = 8;
+constexpr int kGroupSpacing = 32;
 
-    SidewaysCaption(const QString &text, Face face, QWidget *parent = nullptr)
-        : QWidget(parent), text_(text), face_(face) {
-        QFont f = font();
-        f.setPointSizeF(f.pointSizeF() * 0.72);
-        f.setBold(true);
-        setFont(f);
-        Theme::setTextColor(this, Theme::TextDim);
-    }
+// The row's groups, by the names their order is remembered under.
+const QString kUnitMixes = QStringLiteral("mixes");
+const QString kUnitInputs = QStringLiteral("inputs");
+const QString kUnitChannels = QStringLiteral("channels");
+const QString kUnitApp = QStringLiteral("app");
 
-    QSize sizeHint() const override { return captionSize(); }
-    QSize minimumSizeHint() const override { return captionSize(); }
-
-protected:
-    void paintEvent(QPaintEvent *) override {
-        QPainter p(this);
-        p.setRenderHint(QPainter::TextAntialiasing);
-        p.setPen(palette().color(QPalette::WindowText));
-        p.setFont(font());
-        if (face_ == Face::TowardTop) {
-            p.translate(width(), 0);
-            p.rotate(90);
-        } else {
-            p.translate(0, height());
-            p.rotate(-90);
-        }
-        p.drawText(QRect(0, 0, height(), width()), Qt::AlignCenter, text_);
-    }
-
-private:
-    QSize captionSize() const {
-        QFontMetrics fm(font());
-        return {fm.height(), fm.horizontalAdvance(text_)};
-    }
-
-    QString text_;
-    Face face_;
-};
-
-class InputsSectionSeparator : public QWidget {
-public:
-    explicit InputsSectionSeparator(QWidget *parent = nullptr) : QWidget(parent) {
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
-
-        auto *col = new QVBoxLayout(this);
-        col->setContentsMargins(0, 10, 0, 10);
-        col->setSpacing(6);
-
-        col->addWidget(
-            new SidewaysCaption(tr("Input Devices"), SidewaysCaption::Face::TowardTop,
-                                this),
-            0, Qt::AlignHCenter);
-
-        auto *toInputDevices = new QLabel(this);
-        Theme::setPixmap(toInputDevices, QStringLiteral("arrow-left"), Theme::Text, 22);
-        toInputDevices->setAlignment(Qt::AlignCenter);
-        col->addWidget(toInputDevices, 0, Qt::AlignHCenter);
-
-        col->addStretch(1);
-
-        auto *toChannels = new QLabel(this);
-        Theme::setPixmap(toChannels, QStringLiteral("arrow-right"), Theme::Text, 22);
-        toChannels->setAlignment(Qt::AlignCenter);
-        col->addWidget(toChannels, 0, Qt::AlignHCenter);
-
-        col->addWidget(
-            new SidewaysCaption(tr("Channels"), SidewaysCaption::Face::TowardBottom,
-                                this),
-            0, Qt::AlignHCenter);
-    }
-};
+// A group of cards side by side, as one widget in the row so it can be moved
+// as one.
+QWidget *groupHost(QWidget *parent, QHBoxLayout **row) {
+    auto *w = new QWidget(parent);
+    w->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    auto *lay = new QHBoxLayout(w);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(kCardSpacing);
+    *row = lay;
+    return w;
+}
 
 // The heartbeat is a checkable button, so a left click has already flipped its
 // own appearance by the time the handler runs: green -> unchecked, which reads
@@ -207,17 +171,6 @@ QHash<QString, Theme::CardLook> looksFromTable(const QString &table) {
     return out;
 }
 
-// "Keep both faders equal" is window state: the daemon never sees it, so it
-// lives in the mixer's own settings file, keyed by the same card key the
-// colours use.
-bool loadFadersLinked(const QString &cardKey) {
-    QSettings s;
-    s.beginGroup(QStringLiteral("link"));
-    const bool on = s.value(cardKey, false).toBool();
-    s.endGroup();
-    return on;
-}
-
 QStringList loadChannelOrderSetting() {
     QSettings s;
     return s.value(QStringLiteral("channelOrder")).toStringList();
@@ -229,16 +182,6 @@ void saveChannelOrderSetting(const QStringList &order) {
         s.remove(QStringLiteral("channelOrder"));
     else
         s.setValue(QStringLiteral("channelOrder"), order);
-}
-
-void saveFadersLinked(const QString &cardKey, bool on) {
-    QSettings s;
-    s.beginGroup(QStringLiteral("link"));
-    if (on)
-        s.setValue(cardKey, true);
-    else
-        s.remove(cardKey);   // the default; no need to record it
-    s.endGroup();
 }
 
 // Heartbeat colours. Violet used to mean "headphones hear the chain" on every
@@ -355,74 +298,7 @@ void connectEffectsButton(IconToggle *fx, MixerClient *client,
     });
 }
 
-IconToggle *outputMuteToggle(QWidget *parent) {
-    auto *m = new IconToggle(QStringLiteral("speaker-muted"),
-                             QStringLiteral("speaker-high"), parent);
-    m->setAccent(Theme::Danger);
-    m->setIconSize(16);
-    m->setToolTip(QObject::tr("Mute this output."));
-    return m;
-}
-
-IconToggle *streamMuteToggle(QWidget *parent) {
-    auto *m = new IconToggle(QStringLiteral("stream-off"), QStringLiteral("stream"),
-                             parent);
-    m->setAccent(Theme::Danger);
-    m->setIconSize(16);
-    m->setToolTip(QObject::tr("Mute this output."));
-    return m;
-}
-
-QSlider *outputVolumeSlider(QWidget *parent) {
-    auto *s = new QSlider(Qt::Horizontal, parent);
-    s->setRange(0, 100);
-    s->setMinimumWidth(80);
-    s->setFocusPolicy(Qt::StrongFocus);
-    return s;
-}
-
 }  // namespace
-
-// A label that keeps its stylesheet box -- so it can match the device picker
-// beside it -- but elides like one. A plain QLabel clips at its right edge with
-// no ellipsis, which at the width of the name column cuts the name mid-word;
-// the picker on the row above ellipsizes itself, and the two should agree.
-// Elides in the middle for the same reason the character cap does: the head
-// names the device and the tail tells two similar ones apart.
-class BoxedName : public QLabel {
-public:
-    // Replaces the text the elide is computed from. QLabel::setText() would be
-    // undone by the next resize, which recomputes the elide from full_.
-    void setFullText(const QString &text) {
-        full_ = text;
-        applyElide();
-    }
-
-    BoxedName(const QString &text, QWidget *parent)
-        : QLabel(parent), full_(text) {
-        // Ignored, not Preferred: a QLabel reports the full width of its text
-        // as its minimum, which would hold the column open to the length of
-        // the name and undo the narrowing the grid asks for.
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        applyElide();
-    }
-
-protected:
-    void resizeEvent(QResizeEvent *e) override {
-        QLabel::resizeEvent(e);
-        applyElide();
-    }
-
-private:
-    void applyElide() {
-        // contentsRect() is inside the stylesheet's padding and border, so it
-        // is the space the text actually has.
-        QLabel::setText(fontMetrics().elidedText(full_, Qt::ElideRight,
-                                                 contentsRect().width()));
-    }
-
-    QString full_;
-};
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(tr("Waveline"));
@@ -500,72 +376,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     // No side margins on the body: the row of cards runs from one edge of the
     // window to the other and is cut off by it, with its padding inside the
-    // scrolled row instead (see buildInputs()). Outputs keeps the window's
-    // inset with margins of its own, and the Application Settings sidebar is
-    // not a column beside the cards but a card laid over their right-hand end
-    // -- see layoutSidebarOverlay().
+    // scrolled row instead (see buildInputs()). Everything is in that row now
+    // -- inputs, channels, Application Settings and the mixes -- so there is
+    // nothing below it and nothing laid over it.
     auto *bodyWidget = new QWidget(central);
     bodyWidget_ = bodyWidget;
     auto *body = new QHBoxLayout(bodyWidget);
-    // No bottom inset either: with Outputs collapsed the cards, and their
-    // scroll bar, run on to the window's bottom edge. Outputs carries the
-    // inset below itself when it is open.
     body->setContentsMargins(0, 14, 0, 0);
     body->setSpacing(0);
-
-    auto *leftWidget = new QWidget(bodyWidget);
-    auto *left = new QVBoxLayout(leftWidget);
-    left->setContentsMargins(0, 0, 0, 0);
-    left->setSpacing(8);
-    // No "Inputs" or "Outputs" captions: the row of cards labels itself with
-    // its sideways Input Devices / Channels captions, and the output rows
-    // name their mixes.
-    left->addWidget(buildInputs(), 1);
-    auto *outputsContent = new QWidget(central);
-    outputsLayout_ = new QVBoxLayout(outputsContent);
-    // The right inset follows the sidebar -- see layoutSidebarOverlay().
-    outputsLayout_->setContentsMargins(kContentInset, 4, kContentInset, kContentInset);
-    outputsLayout_->setSpacing(8);
-    outputsLayout_->addWidget(buildOutputs());
-    auto *outputsToggle = new PanelEdgeButton(Qt::Vertical, central);
-    outputsToggle->setObjectName(QStringLiteral("toggleOutputsPanel"));
-    auto *outputsPanel = new AnimatedPanel(outputsContent, Qt::Vertical, central);
-    outputsPanel->setObjectName(QStringLiteral("outputsPanel"));
-    left->addWidget(outputsPanel);
-    outputsPanel->setEdgeButton(outputsToggle, leftWidget);
-    const auto updateOutputsToggle = [outputsToggle](bool expanded) {
-        const QString action = expanded ? tr("Collapse outputs") : tr("Expand outputs");
-        outputsToggle->setToolTip(action);
-        outputsToggle->setAccessibleName(action);
-    };
-    const bool outputsExpanded = QSettings().value(QStringLiteral("panels/outputsExpanded"), true).toBool();
-    outputsToggle->setChecked(outputsExpanded);
-    updateOutputsToggle(outputsExpanded);
-    outputsPanel->setExpanded(outputsExpanded, false);
-    connect(outputsToggle, &QAbstractButton::toggled, this,
-            [outputsPanel, updateOutputsToggle](bool expanded) {
-        updateOutputsToggle(expanded);
-        outputsPanel->setExpanded(expanded);
-        QSettings().setValue(QStringLiteral("panels/outputsExpanded"), expanded);
-    });
-    body->addWidget(leftWidget, 1);
-
-    // Over the cards rather than beside them, so it is placed by hand; built
-    // after them, so it stacks on top.
-    buildSidebar()->setParent(bodyWidget);
-    auto *settingsPanel = static_cast<AnimatedPanel *>(sidebar_);
-    auto *settingsToggle = static_cast<PanelEdgeButton *>(findChild<QPushButton *>(QStringLiteral("toggleApplicationSettingsPanel")));
-    settingsToggle->setParent(central);
-    settingsToggle->show();
-    settingsPanel->setEdgeButton(settingsToggle, bodyWidget);
-    bodyWidget->installEventFilter(this);
-    settingsPanel->installEventFilter(this);
-    sidebarCard_->installEventFilter(this);
-    inputsWell_->installEventFilter(this);
+    body->addWidget(buildInputs(), 1);
 
     outer->addWidget(bodyWidget, 1);
     setCentralWidget(central);
-    layoutSidebarOverlay();
 
     if (monarchy) {
         buildMonarchyMenuBar();
@@ -620,7 +442,8 @@ void MainWindow::hideEvent(QHideEvent *e) {
 }
 
 void MainWindow::scrollSidebar(int pixels) {
-    if (sidebarScroll_) sidebarScroll_->verticalScrollBar()->setValue(pixels);
+    // The row of cards, which is where Application Settings lives now.
+    if (stripScroll_) stripScroll_->horizontalScrollBar()->setValue(pixels);
 }
 
 // ================================================================== header
@@ -660,8 +483,9 @@ void MainWindow::addHeaderPills(QWidget *bar, QHBoxLayout *lay, const QColor &ch
     // global menu too.
     diagnosticsBtn_ = Monarchy::toolButton(
         QStringLiteral("gear"),
-        tr("Settings: graph latency, output headroom, warnings, service status "
-           "and measured latency per device."), bar);
+        tr("Settings & Diagnostics: noise suppression, graph latency, output "
+           "headroom, warnings, service status and measured latency per "
+           "device."), bar);
     manageProfiles_ = Monarchy::toolButton(
         QStringLiteral("switch-profile"),
         tr("Profiles: switch between saved mixer setups, and save, rename, "
@@ -789,11 +613,13 @@ void MainWindow::applyMonarchyStyle() {
 // ================================================================== inputs
 
 QWidget *MainWindow::buildInputs() {
-    // The cards live in a recessed well, the way Wave Link groups its inputs.
-    // It is what makes them read as one row of things rather than six
-    // unrelated panels.
+    // The row of cards. It used to sit in a darker recessed well; now the
+    // window shows through and each card is set off by its own lighter fill
+    // and coloured outline instead.
     auto *well = new CardBase(this);
-    well->setFillColor(Theme::Well);
+    // No fill of its own: the window shows through, the same as behind the
+    // Monitor mix section, and the lighter cards stand on it.
+    well->setFillColor(Qt::transparent);
     // Square: it runs from the window's edge, and a rounded end there would
     // read as the well stopping short of it.
     well->setRadius(0);
@@ -807,16 +633,14 @@ QWidget *MainWindow::buildInputs() {
     auto *host = new QWidget(well);
     stripHost_ = host;
     loadChannelOrder();
-    // Cards are reordered by dragging their link button; the row they land in
-    // is this widget. See handleStripDrag().
-    host->setAcceptDrops(true);
-    host->installEventFilter(this);
     stripRow_ = new QHBoxLayout(host);
     // The window's inset, inside the scroll: scrolled to either end, the
     // first or last card lines up with the content below it; scrolled
     // between, the cards run on to the window's edge and are cut off by it.
     stripRow_->setContentsMargins(kContentInset, 10, kContentInset, 10);
-    stripRow_->setSpacing(8);
+    // Only groups sit in the row, so its spacing is the gap between groups.
+    // A hidden group takes none.
+    stripRow_->setSpacing(kGroupSpacing);
 
     // Shown while there are no cards, so a stopped daemon leaves an
     // explanation rather than a large empty rectangle.
@@ -824,17 +648,35 @@ QWidget *MainWindow::buildInputs() {
     emptyLabel_->setAlignment(Qt::AlignCenter);
     stripRow_->addWidget(emptyLabel_, 1);
 
-    inputsSeparator_ = new InputsSectionSeparator(host);
-    inputsSeparator_->hide();
-    stripRow_->addWidget(inputsSeparator_);
+    QWidget *mixes = buildOutputs();
+    mixes->setParent(host);
+    inputsHost_ = groupHost(host, &inputsRow_);
+    inputsHost_->hide();
+    channelsHost_ = groupHost(host, &channelsRow_);
+    channelsHost_->hide();
+    QWidget *appSettings = buildSoundSharingSection();
+    appSettings->setParent(host);
+    appSettings->installEventFilter(this);
 
-    stripRow_->addStretch();
+    // In the order the user left them, any not in it at their usual place.
+    QStringList order = QSettings().value(QStringLiteral("rowOrder")).toStringList();
+    const QStringList usual = {kUnitMixes, kUnitInputs, kUnitChannels, kUnitApp};
+    for (const QString &u : usual)
+        if (!order.contains(u)) order.insert(std::min(usual.indexOf(u), order.size()), u);
+    for (const QString &u : order) {
+        if (QWidget *w = rowUnit(u)) stripRow_->addWidget(w);
+    }
+    // No stretch at the end: with room to spare the cards take it between
+    // them -- see updateRowStretch().
 
     // Horizontal scrolling rather than shrinking cards: a fader that is 40 px
     // tall is not a fader.
     auto *scroll = new QScrollArea(well);
+    stripScroll_ = scroll;
     scroll->setWidget(host);
     scroll->setWidgetResizable(true);
+    shuffle_ = new CardShuffle(this);
+    shuffle_->setScrollArea(scroll);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -848,114 +690,113 @@ QWidget *MainWindow::buildInputs() {
 // ================================================================= outputs
 
 QWidget *MainWindow::buildOutputs() {
-    outputsCard_ = new CardBase(this);
-    outputsCard_->setFillColor(Theme::Card);
-    outputsCard_->setRadius(12);
+    // The mixes, at the front of the row: #1, #2, ... and the Stream mix.
+    auto *block = new QWidget(this);
+    outputsBlock_ = block;
+    block->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    auto *row = new QHBoxLayout(block);
+    row->setContentsMargins(0, 0, 0, 0);
+    // A little apart from the Monitor mixes: the Stream mix is a mix too, but
+    // a different kind.
+    row->setSpacing(2 * kCardSpacing);
+    outputsRow_ = row;
 
-    outputsGrid_ = new QGridLayout(outputsCard_);
-    outputsGrid_->setContentsMargins(14, 12, 14, 12);
-    outputsGrid_->setHorizontalSpacing(10);
-    outputsGrid_->setVerticalSpacing(10);
+    monitorHost_ = groupHost(block, &monitorCardsRow_);
+    row->addWidget(monitorHost_);
 
-    streamIcon_ = new QLabel(outputsCard_);
-    Theme::setPixmap(streamIcon_, QStringLiteral("stream"), Theme::TextDim, 18);
+    // Lives on the last Monitor mix card -- see syncMonitorOutputUi().
+    addMonitorBtn_ = squareOverlayButton(QStringLiteral("plus"),
+                                         tr("Add another Monitor mix output (up to 5)."),
+                                         block);
+    addMonitorBtn_->hide();
+    connect(addMonitorBtn_, &QPushButton::clicked, this, &MainWindow::onAddMonitorOutput);
 
-    streamNameLabel_ = new QLabel(tr("Stream mix"), outputsCard_);
-    QFont bold = streamNameLabel_->font();
-    bold.setBold(true);
-    streamNameLabel_->setFont(bold);
-
-    streamMixName_ = new BoxedName(tr("Waveline Stream Mix"), outputsCard_);
-    streamMixName_->setObjectName(QStringLiteral("fixedOutput"));
-    streamMixName_->setToolTip(
-        tr("The Stream mix is a virtual device, not a speaker: it has no output "
-           "to choose. Point your recorder or streaming software at it."));
-
-    streamMute_ = streamMuteToggle(outputsCard_);
-    streamMute_->setToolTip(tr("Mute the Stream mix virtual device."));
-    connect(streamMute_, &QAbstractButton::toggled, this, [this](bool muted) {
-        if (!client_->available()) return;
-        client_->setStreamMixMuted(muted);
+    streamCard_ = new MixCard(MixCard::Kind::Stream, block);
+    streamCard_->setDescription(tr("Waveline Stream Mix"));
+    connect(streamCard_, &MixCard::identityClicked, this,
+            [this] { editCardIdentity(QStringLiteral("stream"), QString()); });
+    connect(streamCard_, &MixCard::volumeChanged, this, [this](double v) {
+        if (client_->available()) client_->setStreamMixVolume(v);
     });
-
-    streamVolume_ = outputVolumeSlider(outputsCard_);
-    streamVolume_->setToolTip(tr("Level of the Stream mix virtual device."));
-    connect(streamVolume_, &QSlider::valueChanged, this, [this](int v) {
-        if (!client_->available()) return;
-        client_->setStreamMixVolume(v / 100.0);
+    connect(streamCard_, &MixCard::muteToggled, this, [this](bool muted) {
+        if (client_->available()) client_->setStreamMixMuted(muted);
     });
-
-    streamMeter_ = new LevelMeter(Qt::Horizontal, outputsCard_);
-    streamMeter_->setThickness(8);
-    streamMeter_->setMinimumWidth(110);
-
-    outputsGrid_->setColumnStretch(2, 2);
-    outputsGrid_->setColumnStretch(5, 3);
-    outputsGrid_->setColumnStretch(6, 4);
+    // Before the Monitor mixes or after them, wherever it was last moved.
+    if (QSettings().value(QStringLiteral("streamMixFirst")).toBool())
+        row->insertWidget(0, streamCard_);
+    else
+        row->addWidget(streamCard_);
+    streamCard_->installEventFilter(this);
 
     syncMonitorOutputUi();
-    return outputsCard_;
+    return block;
 }
 
-QString MainWindow::monitorOutputLabel(int index, int total) const {
-    if (total <= 1) return tr("Monitor mix");
-    return tr("Monitor mix #%1").arg(index + 1);
-}
-
-// Two Monitor mixes on one device would each load a loopback onto it: they
-// fight over the clock driver and the device plays the sum of both faders. So
-// a device another row already owns is simply not offered here -- the row's
-// own device always is, otherwise it could not stay selected.
-void MainWindow::fillMonitorOutputCombo(QComboBox *combo, int index,
-                                        const QList<MonitorOutputInfo> &states,
-                                        const QList<OutputInfo> &outs) {
-    if (!combo) return;
-    const MonitorOutputInfo state =
-        index < states.size() ? states[index] : MonitorOutputInfo{};
+void MainWindow::showMonitorOutputMenu(int index) {
+    if (!client_->available() || index < 0 || index >= monitorOutputRows_.size()) return;
+    MixCard *card = monitorOutputRows_[index].card;
+    if (!card) return;
+    const QList<MonitorOutputInfo> states = client_->monitorOutputStates();
+    const QList<OutputInfo> outs = client_->outputs();
+    const MonitorOutputInfo state = index < states.size() ? states[index] : MonitorOutputInfo{};
     const QString cur = state.sink;
+    // Two Monitor mixes on one device would each load a loopback onto it: they
+    // fight over the clock driver and the device plays the sum of both faders.
+    // So a device another mix already owns is simply not offered here.
     QSet<QString> taken;
     for (int j = 0; j < states.size(); ++j) {
         if (j == index || states[j].sink.isEmpty()) continue;
         taken.insert(states[j].sink);
     }
 
-    QSignalBlocker block(combo);
-    combo->clear();
+    QMenu menu(this);
+    auto *group = new QActionGroup(&menu);
     bool found = false;
-    for (const auto &o : outs) {
+    for (const OutputInfo &o : outs) {
         if (taken.contains(o.name)) continue;
-        combo->addItem(elideEnd(o.description), o.name);
-        combo->setItemData(combo->count() - 1, o.description, Qt::ToolTipRole);
+        QAction *a = menu.addAction(elideEnd(o.description));
+        a->setToolTip(o.description);
+        a->setCheckable(true);
+        a->setChecked(o.name == cur);
+        group->addAction(a);
         if (o.name == cur) found = true;
+        connect(a, &QAction::triggered, this, [this, index, name = o.name, cur] {
+            if (name != cur && client_->available()) client_->setMonitorOutputAt(index, name);
+        });
     }
-    // Assigned sink is offline — keep it in the list, greyed, waiting.
+    // The assigned device is unplugged: it stays the choice, shown waiting.
     if (!cur.isEmpty() && !found) {
-        QString label = state.description.isEmpty() ? cur : state.description;
-        label += tr(" (disconnected)");
-        combo->addItem(elideEnd(label), cur);
-        const int idx = combo->count() - 1;
-        combo->setItemData(idx, label, Qt::ToolTipRole);
-        combo->setItemData(idx, QBrush(Theme::TextFaint), Qt::ForegroundRole);
+        QAction *a = menu.addAction(
+            elideEnd((state.description.isEmpty() ? cur : state.description) +
+                     tr(" (disconnected)")));
+        a->setCheckable(true);
+        a->setChecked(true);
+        a->setEnabled(false);
     }
-    for (int j = 0; j < combo->count(); ++j) {
-        if (combo->itemData(j).toString() == cur) {
-            combo->setCurrentIndex(j);
-            break;
-        }
-    }
+    menu.addSeparator();
+    // The card's tile is where it is clicked, so its look is edited from here.
+    menu.addAction(tr("Colour and icon\u2026"), this, [this, index] {
+        editCardIdentity(QStringLiteral("mix"), QString::number(index));
+    });
+    if (index > 0)
+        menu.addAction(tr("Remove this Monitor mix"), this,
+                       [this, index] { onRemoveMonitorOutput(index); });
+    QWidget *handle = card->handle();
+    menu.exec(handle->mapToGlobal(QPoint(0, handle->height())));
 }
 
 // Nothing left to add once every output device drives a Monitor mix: greyed
-// with a tooltip that says so, rather than an "+" that silently does nothing.
-void MainWindow::applyAddMonitorOutputEnabled(MonitorOutputRowUi &row,
-                                              const QList<MonitorOutputInfo> &states,
-                                              const QList<OutputInfo> &outs) {
-    if (!row.addBtn) return;
+// with a tooltip that says so, rather than a "+" that silently does nothing.
+void MainWindow::syncAddMonitorButton(const QList<MonitorOutputInfo> &states,
+                                      const QList<OutputInfo> &outs) {
+    if (!addMonitorBtn_) return;
+    const bool room = states.size() < 5;
     const bool free = !freeMonitorOutputDevice(states, outs).isEmpty();
-    row.addBtn->setEnabled(free);
-    row.addBtn->setToolTip(
-        free ? tr("Add another Monitor mix output (up to 5).")
-             : tr("Every output device is already assigned to a Monitor mix."));
+    addMonitorBtn_->setEnabled(client_->available() && room && free);
+    addMonitorBtn_->setToolTip(
+        !room   ? tr("Five Monitor mixes is the most there can be.")
+        : free  ? tr("Add another Monitor mix output (up to 5).")
+                : tr("Every output device is already assigned to a Monitor mix."));
 }
 
 QString MainWindow::freeMonitorOutputDevice(const QList<MonitorOutputInfo> &states,
@@ -968,299 +809,249 @@ QString MainWindow::freeMonitorOutputDevice(const QList<MonitorOutputInfo> &stat
     return {};
 }
 
-void MainWindow::refreshMonitorOutputCombos() {
+void MainWindow::refreshMonitorOutputDevices() {
     if (!client_->available()) return;
     const QList<MonitorOutputInfo> states = client_->monitorOutputStates();
     const QList<OutputInfo> outs = client_->outputs();
     for (int i = 0; i < monitorOutputRows_.size(); ++i) {
-        MonitorOutputRowUi &row = monitorOutputRows_[i];
-        if (!row.combo) continue;
-        const MonitorOutputInfo s =
-            i < states.size() ? states[i] : MonitorOutputInfo{};
-        fillMonitorOutputCombo(row.combo, i, states, outs);
-        applyMonitorOutputRowConnected(row, s.connected || s.sink.isEmpty());
-        applyAddMonitorOutputEnabled(row, states, outs);
+        MixCard *card = monitorOutputRows_[i].card;
+        if (!card) continue;
+        const MonitorOutputInfo s = i < states.size() ? states[i] : MonitorOutputInfo{};
+        QString name = s.description;
+        for (const OutputInfo &o : outs)
+            if (o.name == s.sink) name = o.description;
+        if (name.isEmpty()) name = s.sink.isEmpty() ? tr("No device") : s.sink;
+        card->setDescription(name);
+        card->setConnected(s.connected || s.sink.isEmpty());
     }
-}
-
-void MainWindow::applyMonitorOutputRowConnected(MonitorOutputRowUi &row,
-                                                bool connected) {
-    const QColor &iconColor = connected ? Theme::TextDim : Theme::TextFaint;
-    if (row.icon) {
-        Theme::setPixmap(row.icon, QStringLiteral("headphones"), iconColor, 18);
-        row.icon->setEnabled(connected);
-    }
-    if (row.label) {
-        Theme::setTextColor(row.label, connected ? Theme::Text : Theme::TextFaint);
-    }
-    // Combo stays usable so the user can pick a different device while waiting.
-    if (row.mute) row.mute->setEnabled(connected);
-    if (row.volume) row.volume->setEnabled(connected);
-    if (row.meter) {
-        row.meter->setEnabled(connected);
-        if (!connected) row.meter->setLevel(0.0);
-    }
+    syncAddMonitorButton(states, outs);
 }
 
 void MainWindow::refreshMonitorOutputControls() {
     if (!client_->available()) return;
     const QList<MonitorOutputInfo> states = client_->monitorOutputStates();
-    for (int i = 0; i < monitorOutputRows_.size(); ++i) {
-        MonitorOutputRowUi &row = monitorOutputRows_[i];
-        if (i >= states.size()) break;
-        const MonitorOutputInfo &s = states[i];
-        applyMonitorOutputRowConnected(row, s.connected || s.sink.isEmpty());
-        if (row.volume) {
-            // Do not push daemon values back while the user is adjusting: that
-            // used to fight keyboard focus and felt like arrows only worked once.
-            if (row.volume->hasFocus() || row.volume->isSliderDown()) continue;
-            QSignalBlocker b(row.volume);
-            row.volume->setValue(int(s.volume * 100.0 + 0.5));
-        }
-        if (row.mute) {
-            QSignalBlocker b(row.mute);
-            row.mute->setChecked(s.muted);
-        }
+    for (int i = 0; i < monitorOutputRows_.size() && i < states.size(); ++i) {
+        MixCard *card = monitorOutputRows_[i].card;
+        if (!card) continue;
+        card->setConnected(states[i].connected || states[i].sink.isEmpty());
+        card->setVolume(states[i].volume);
+        card->setMuted(states[i].muted);
     }
-    if (streamVolume_) {
-        if (!streamVolume_->hasFocus() && !streamVolume_->isSliderDown()) {
-            QSignalBlocker b(streamVolume_);
-            streamVolume_->setValue(int(client_->streamMixVolume() * 100.0 + 0.5));
-        }
-    }
-    if (streamMute_) {
-        QSignalBlocker b(streamMute_);
-        streamMute_->setChecked(client_->streamMixMuted());
+    if (streamCard_) {
+        streamCard_->setVolume(client_->streamMixVolume());
+        streamCard_->setMuted(client_->streamMixMuted());
     }
 }
 
 void MainWindow::syncMonitorOutputUi() {
-    if (!outputsGrid_ || !outputsCard_) return;
+    if (!monitorCardsRow_) return;
 
     const QList<MonitorOutputInfo> states =
         client_ && client_->available() ? client_->monitorOutputStates()
                                           : QList<MonitorOutputInfo>{};
-    const auto outs = client_ && client_->available() ? client_->outputs() : QList<OutputInfo>{};
     const int count = qMax(1, states.size());
-    QString sig = QStringLiteral("%1|%2").arg(count).arg(outs.size());
-    for (const MonitorOutputInfo &s : states)
-        sig += QLatin1Char('|') + s.sink +
-               (s.connected ? QLatin1Char('1') : QLatin1Char('0'));
-
+    // Rebuilt only when the number of mixes changes: a device moving between
+    // them is the same cards with new tooltips and levels.
+    const QString sig = QString::number(count);
     if (sig == monitorOutputsSig_ && monitorOutputRows_.size() == count) {
-        refreshMonitorOutputCombos();
-        refreshMonitorOutputControls();
-        for (int i = 0; i < monitorOutputRows_.size(); ++i) {
-            MonitorOutputRowUi &row = monitorOutputRows_[i];
-            if (row.label) row.label->setText(monitorOutputLabel(i, count));
-            // Enabled state comes from refreshMonitorOutputCombos() above.
-            if (row.addBtn) row.addBtn->setVisible(i == 0 && count < 5);
-            if (row.removeBtn) row.removeBtn->setVisible(count > 1 && i > 0);
-        }
+        refreshMonitorOutputDevices();
         return;
     }
     monitorOutputsSig_ = sig;
 
+    // The "+" belongs to whichever card is last; out of the old ones first, or
+    // it goes with them.
+    if (addMonitorBtn_) {
+        addMonitorBtn_->setParent(outputsBlock_);
+        addMonitorBtn_->hide();
+    }
     for (const MonitorOutputRowUi &row : monitorOutputRows_) {
-        if (row.icon) row.icon->deleteLater();
-        if (row.label) row.label->deleteLater();
-        if (row.combo) row.combo->deleteLater();
-        if (row.addBtn) row.addBtn->deleteLater();
-        if (row.removeBtn) row.removeBtn->deleteLater();
-        if (row.mute) row.mute->deleteLater();
-        if (row.volume) row.volume->deleteLater();
-        if (row.meter) row.meter->deleteLater();
+        if (!row.card) continue;
+        monitorCardsRow_->removeWidget(row.card);
+        row.card->hide();
+        row.card->deleteLater();
     }
     monitorOutputRows_.clear();
-
-    if (streamIcon_) outputsGrid_->removeWidget(streamIcon_);
-    if (streamNameLabel_) outputsGrid_->removeWidget(streamNameLabel_);
-    if (streamMixName_) outputsGrid_->removeWidget(streamMixName_);
-    if (streamMute_) outputsGrid_->removeWidget(streamMute_);
-    if (streamVolume_) outputsGrid_->removeWidget(streamVolume_);
-    if (streamMeter_) outputsGrid_->removeWidget(streamMeter_);
+    monitorDragFrom_ = -1;
+    monitorDragging_ = false;
 
     for (int i = 0; i < count; ++i) {
         MonitorOutputRowUi row;
-        const MonitorOutputInfo s =
-            i < states.size() ? states[i] : MonitorOutputInfo{};
-        const bool connected = s.connected || s.sink.isEmpty();
-        row.icon = new QLabel(outputsCard_);
-        Theme::setPixmap(row.icon, QStringLiteral("headphones"),
-                         connected ? Theme::TextDim : Theme::TextFaint, 18);
-        outputsGrid_->addWidget(row.icon, i, 0);
-
-        row.label = new QLabel(monitorOutputLabel(i, count), outputsCard_);
-        QFont labelFont = row.label->font();
-        labelFont.setBold(true);
-        row.label->setFont(labelFont);
-        outputsGrid_->addWidget(row.label, i, 1);
-
-        row.combo = new QComboBox(outputsCard_);
-        row.combo->setMinimumWidth(120);
-        row.combo->setToolTip(
-            tr("Where this Monitor mix copy is played. Each output receives the "
-               "same mix; level and mute are per device. Assigned devices stay "
-               "selected when unplugged (shown as disconnected) so monitor never "
-               "falls back to another sink."));
-        if (client_ && client_->available())
-            fillMonitorOutputCombo(row.combo, i, states, outs);
-        connect(row.combo, &QComboBox::activated, this,
-                [this, i](int idx) { onOutputPicked(i, idx); });
-        outputsGrid_->addWidget(row.combo, i, 2);
-
-        if (i == 0 && count < 5) {
-            row.addBtn = iconButton(QStringLiteral("plus"),
-                                    tr("Add another Monitor mix output (up to 5)."),
-                                    outputsCard_);
-            connect(row.addBtn, &QPushButton::clicked, this, &MainWindow::onAddMonitorOutput);
-            outputsGrid_->addWidget(row.addBtn, i, 3);
-            applyAddMonitorOutputEnabled(row, states, outs);
-        }
+        row.card = new MixCard(MixCard::Kind::Monitor, outputsBlock_);
+        connect(row.card, &MixCard::volumeChanged, this, [this, i](double v) {
+            if (client_->available()) client_->setMonitorOutputVolumeAt(i, v);
+        });
+        connect(row.card, &MixCard::muteToggled, this, [this, i](bool muted) {
+            if (client_->available()) client_->setMonitorOutputMutedAt(i, muted);
+        });
+        row.card->handle()->installEventFilter(this);
+        row.card->installEventFilter(this);
+        row.card->setEnabled(client_ && client_->available());
+        // Every mix but the first can be removed: there is always one.
         if (i > 0) {
-            row.removeBtn = iconButton(QStringLiteral("minus"),
-                                       tr("Remove this Monitor mix output."),
-                                       outputsCard_);
-            connect(row.removeBtn, &QPushButton::clicked, this,
+            QPushButton *remove = squareOverlayButton(
+                QStringLiteral("minus"), tr("Remove this Monitor mix."), row.card);
+            connect(remove, &QPushButton::clicked, this,
                     [this, i] { onRemoveMonitorOutput(i); });
-            outputsGrid_->addWidget(row.removeBtn, i, 3);
+            row.card->setRemoveButton(remove);
         }
-
-        row.mute = outputMuteToggle(outputsCard_);
-        row.mute->setToolTip(tr("Mute this Monitor mix output only."));
-        if (i < states.size()) row.mute->setChecked(states[i].muted);
-        connect(row.mute, &QAbstractButton::toggled, this, [this, i](bool muted) {
-            if (!client_->available()) return;
-            client_->setMonitorOutputMutedAt(i, muted);
-        });
-        outputsGrid_->addWidget(row.mute, i, 4);
-
-        row.volume = outputVolumeSlider(outputsCard_);
-        row.volume->setToolTip(tr("Level for this Monitor mix output."));
-        if (i < states.size())
-            row.volume->setValue(int(states[i].volume * 100.0 + 0.5));
-        connect(row.volume, &QSlider::valueChanged, this, [this, i](int v) {
-            if (!client_->available()) return;
-            client_->setMonitorOutputVolumeAt(i, v / 100.0);
-        });
-        outputsGrid_->addWidget(row.volume, i, 5);
-
-        row.meter = new LevelMeter(Qt::Horizontal, outputsCard_);
-        row.meter->setThickness(8);
-        row.meter->setMinimumWidth(80);
-        outputsGrid_->addWidget(row.meter, i, 6);
-
-        applyMonitorOutputRowConnected(row, connected);
         monitorOutputRows_.append(row);
     }
+    // Laid out in the order the user put them in, which is only the window's:
+    // the daemon keeps its own, and the numbers and colours follow that.
+    for (int i : displayedMonitorOrder(states, count))
+        monitorCardsRow_->addWidget(monitorOutputRows_[i].card);
+    seatMonitorAddButton();
+    refreshMonitorOutputDevices();
+    refreshMonitorOutputControls();
+    applyCardLooks();
+    updateRowStretch();
+}
 
-    outputsGrid_->addWidget(streamIcon_, count, 0);
-    outputsGrid_->addWidget(streamNameLabel_, count, 1);
-    outputsGrid_->addWidget(streamMixName_, count, 2);
-    outputsGrid_->addWidget(streamMute_, count, 4);
-    outputsGrid_->addWidget(streamVolume_, count, 5);
-    outputsGrid_->addWidget(streamMeter_, count, 6);
+void MainWindow::updateRowStretch() {
+    if (!stripRow_) return;
+    // Each card's share of the row is its own width: with room to spare they
+    // all widen by the same factor and keep their proportions -- a channel
+    // card stays wider than a mix -- and with none, every one is held at that
+    // width and the row scrolls. A group's share is the sum of its cards', so
+    // the gaps between groups never grow.
+    const auto weight = [](const QWidget *w) { return std::max(1, w->minimumWidth()); };
+    const auto spread = [&](QBoxLayout *row) {
+        int sum = 0;
+        if (!row) return sum;
+        for (int i = 0; i < row->count(); ++i) {
+            QWidget *w = row->itemAt(i)->widget();
+            if (!w) continue;
+            row->setStretchFactor(w, weight(w));
+            sum += weight(w);
+        }
+        return sum;
+    };
+    const int monitors = spread(monitorCardsRow_);
+    int mixes = monitors;
+    if (outputsRow_ && monitorHost_) outputsRow_->setStretchFactor(monitorHost_, std::max(1, monitors));
+    if (outputsRow_ && streamCard_) {
+        outputsRow_->setStretchFactor(streamCard_, weight(streamCard_));
+        mixes += weight(streamCard_);
+    }
+    const int inputs = spread(inputsRow_);
+    const int channels = spread(channelsRow_);
+    if (outputsBlock_) stripRow_->setStretchFactor(outputsBlock_, std::max(1, mixes));
+    if (inputsHost_) stripRow_->setStretchFactor(inputsHost_, std::max(1, inputs));
+    if (channelsHost_) stripRow_->setStretchFactor(channelsHost_, std::max(1, channels));
+    if (sidebarCard_) stripRow_->setStretchFactor(sidebarCard_, weight(sidebarCard_));
+}
+
+QWidget *MainWindow::rowUnit(const QString &name) const {
+    if (name == kUnitMixes) return outputsBlock_;
+    if (name == kUnitInputs) return inputsHost_;
+    if (name == kUnitChannels) return channelsHost_;
+    if (name == kUnitApp) return sidebarCard_;
+    return nullptr;
+}
+
+void MainWindow::beginUnitMove(QWidget *unit, const QPoint &press) {
+    // Every group on show, Application Settings among them. A hidden one --
+    // no channels yet -- keeps its place in the row and is passed over.
+    QList<QWidget *> group;
+    for (int i = 0; i < stripRow_->count(); ++i) {
+        QWidget *w = stripRow_->itemAt(i)->widget();
+        if (!w || w == emptyLabel_ || w->isHidden()) continue;
+        group << w;
+    }
+    shuffle_->begin(stripRow_, unit, group, press, [this] {
+        QStringList order;
+        for (int i = 0; i < stripRow_->count(); ++i) {
+            QWidget *w = stripRow_->itemAt(i)->widget();
+            for (const QString &u : {kUnitMixes, kUnitInputs, kUnitChannels, kUnitApp})
+                if (w && w == rowUnit(u)) order << u;
+        }
+        QSettings().setValue(QStringLiteral("rowOrder"), order);
+        updateRowStretch();
+    });
+}
+
+void MainWindow::syncGroupVisibility() {
+    if (inputsHost_) inputsHost_->setVisible(!masterStrips_.isEmpty());
+    if (channelsHost_) channelsHost_->setVisible(!strips_.isEmpty());
+}
+
+bool MainWindow::handleBodyDrag(QObject *watched, QEvent *event) {
+    // The Stream mix and Application Settings, picked up by their bodies.
+    QWidget *body = nullptr;
+    if (streamCard_ && watched == streamCard_) body = streamCard_;
+    else if (sidebarCard_ && watched == sidebarCard_) body = sidebarCard_;
+    if (!body) return false;
+
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: {
+        auto *e = static_cast<QMouseEvent *>(event);
+        if (e->button() != Qt::LeftButton || shuffle_->busy()) return false;
+        bodyDrag_ = body;
+        bodyDragging_ = false;
+        bodyDragStart_ = e->globalPosition().toPoint();
+        return true;
+    }
+    case QEvent::MouseMove: {
+        if (bodyDrag_ != body) return false;
+        auto *e = static_cast<QMouseEvent *>(event);
+        const QPoint pos = e->globalPosition().toPoint();
+        if (bodyDragging_) {
+            shuffle_->move(pos);
+            return true;
+        }
+        if ((pos - bodyDragStart_).manhattanLength() < QApplication::startDragDistance())
+            return true;
+        bodyDragging_ = true;
+        body->setCursor(Qt::ClosedHandCursor);
+        const bool whole = e->modifiers() & Qt::ControlModifier;
+        if (body == sidebarCard_ || whole) {
+            beginUnitMove(body == sidebarCard_ ? sidebarCard_ : outputsBlock_, bodyDragStart_);
+        } else {
+            // The Stream mix trades places with the Monitor mixes as a block.
+            shuffle_->begin(outputsRow_, streamCard_, {monitorHost_, streamCard_},
+                            bodyDragStart_, [this] {
+                                QSettings().setValue(
+                                    QStringLiteral("streamMixFirst"),
+                                    outputsRow_->indexOf(streamCard_) <
+                                        outputsRow_->indexOf(monitorHost_));
+                                updateRowStretch();
+                            });
+        }
+        shuffle_->move(pos);
+        return true;
+    }
+    case QEvent::MouseButtonRelease: {
+        if (bodyDrag_ != body) return false;
+        bodyDrag_ = nullptr;
+        if (bodyDragging_) {
+            bodyDragging_ = false;
+            body->unsetCursor();
+            shuffle_->end();
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 // ================================================================= sidebar
 
-void MainWindow::layoutSidebarOverlay() {
-    if (!bodyWidget_ || !sidebar_ || !inputsWell_ || !sidebarCard_ || !stripRow_
-        || !outputsLayout_ || inOverlayLayout_)
-        return;
-    // Moving and masking below raise the very events that call this.
-    inOverlayLayout_ = true;
-
-    // Against the right edge, from the top of the cards to the window's inset
-    // above the bottom. Its width is its own: the panel animates it.
-    const int top = bodyWidget_->layout()->contentsMargins().top();
-    sidebar_->setGeometry(bodyWidget_->width() - sidebar_->width(), top, sidebar_->width(),
-                          std::max(0, bodyWidget_->height() - top - kContentInset));
-    sidebar_->raise();
-
-    // The room the sidebar takes from the right-hand end: the cards scroll on
-    // under it, so the row is padded by that much and, scrolled to the end,
-    // its last card still lands the window's inset short of the sidebar.
-    // Outputs, beside it, stops the same inset short.
-    const int taken = sidebar_->isVisible() ? sidebar_->width() : 0;
-    QMargins strip = stripRow_->contentsMargins();
-    if (strip.right() != taken + kContentInset) {
-        strip.setRight(taken + kContentInset);
-        stripRow_->setContentsMargins(strip);
-    }
-    QMargins outputs = outputsLayout_->contentsMargins();
-    if (outputs.right() != taken + kContentInset) {
-        outputs.setRight(taken + kContentInset);
-        outputsLayout_->setContentsMargins(outputs);
-    }
-
-    // Nothing of the cards is painted under the sidebar's card, so its
-    // rounded corners are the only place they show through. Without this,
-    // Monarchy's translucent card would show them faintly under all of it.
-    if (sidebar_->isVisible() && sidebarCard_->isVisible()) {
-        // Through the window: mapTo() only maps towards a widget's own
-        // ancestors, and the sidebar is not inside the well.
-        const QRect card(inputsWell_->mapFrom(this, sidebarCard_->mapTo(this, QPoint(0, 0))),
-                         sidebarCard_->size());
-        QPainterPath shape;
-        shape.addRoundedRect(QRectF(card), sidebarCard_->radius(), sidebarCard_->radius());
-        inputsWell_->setMask(QRegion(inputsWell_->rect())
-                             - QRegion(shape.toFillPolygon().toPolygon()));
-    } else {
-        inputsWell_->clearMask();
-    }
-    inOverlayLayout_ = false;
-}
-
-QWidget *MainWindow::buildSidebar() {
-    auto *page = new QWidget(this);
-    auto *lay = new QVBoxLayout(page);
-    // The window's inset on the right, now that the body has none: the
-    // sidebar keeps it for itself, and takes it away when it collapses.
-    lay->setContentsMargins(0, 0, kContentInset, 0);
-    lay->setSpacing(12);
-    lay->addWidget(buildSoundSharingSection(), 1);
-    // Vendor hardware (Clipguard, direct monitor, …) lives in each master's
-    // Global Effects panel when that bus is assigned a supported microphone.
-
-    sidebarScroll_ = new QScrollArea(this);
-    sidebarScroll_->setWidget(page);
-    sidebarScroll_->setWidgetResizable(true);
-    sidebarScroll_->setFrameShape(QFrame::NoFrame);
-    sidebarScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    sidebarScroll_->viewport()->setAutoFillBackground(false);
-    page->setAutoFillBackground(false);
-    sidebarScroll_->setFixedWidth(kSidebarWidth + kContentInset);
-
-    auto *toggle = new PanelEdgeButton(Qt::Horizontal, this);
-    toggle->setObjectName(QStringLiteral("toggleApplicationSettingsPanel"));
-    auto *panel = new AnimatedPanel(sidebarScroll_, Qt::Horizontal, this);
-    panel->setObjectName(QStringLiteral("applicationSettingsPanel"));
-    sidebar_ = panel;
-    const auto updateToggle = [toggle](bool expanded) {
-        const QString action = expanded ? tr("Collapse Application Settings")
-                                        : tr("Expand Application Settings");
-        toggle->setToolTip(action);
-        toggle->setAccessibleName(action);
-    };
-    const bool expanded = QSettings().value(QStringLiteral("panels/applicationSettingsExpanded"), true).toBool();
-    toggle->setChecked(expanded);
-    updateToggle(expanded);
-    panel->setExpanded(expanded, false);
-    connect(toggle, &QAbstractButton::toggled, this, [panel, updateToggle](bool on) {
-        updateToggle(on);
-        panel->setExpanded(on);
-        QSettings().setValue(QStringLiteral("panels/applicationSettingsExpanded"), on);
-    });
-    return sidebar_;
-}
-
 Section *MainWindow::buildSoundSharingSection() {
     // Applications, their channel and their microphone sharing are one
     // decision per app, so they live in one place rather than two sections
-    // that had to be kept in step by eye.
+    // that had to be kept in step by eye. A card in the row like the others,
+    // just before the mixes.
     auto *s = new Section(tr("Application Settings"), this);
     sidebarCard_ = s;
+    // A floor, like every card's: it widens with the rest when there is room.
+    s->setMinimumWidth(kSidebarWidth);
+    s->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    s->setRadius(12);
+    s->setFillColor(Theme::CardHover);
+    s->setCaptionCentered(true);
+    s->setBorderColor(kAppSettingsColor);
     soundSharingTab_ = new SoundSharingTab(client_, s);
     s->contentLayout()->addWidget(soundSharingTab_);
     return s;
@@ -1436,6 +1227,18 @@ void MainWindow::showGlobalEffects(const QString &masterId) {
     w->activateWindow();
 }
 
+void MainWindow::showChannelRack(const QString &channelId, const QString &name) {
+    // Keyed apart from the inputs' racks: a channel and an input device can
+    // share an id ("mic").
+    const QString key = QStringLiteral("channel:") + channelId;
+    if (!virtualRacks_.contains(key))
+        virtualRacks_.insert(key, new VirtualRackWindow(client_, channelId, name, this, true));
+    VirtualRackWindow *w = virtualRacks_.value(key);
+    w->show();
+    w->raise();
+    w->activateWindow();
+}
+
 void MainWindow::showVirtualRack(const QString &masterId, const QString &name) {
     if (!virtualRacks_.contains(masterId))
         virtualRacks_.insert(masterId,
@@ -1499,7 +1302,7 @@ void MainWindow::refreshRoutingBanner() {
 
         auto *dismiss = new QPushButton(tr("Don't warn me about %1").arg(c.sinkLabel), row);
         dismiss->setToolTip(tr("Stops this warning for “%1” for good.\n"
-                               "Undo it under Audio diagnostics.")
+                               "Undo it under Settings & Diagnostics ▸ Warnings.")
                                 .arg(c.sinkLabel));
         dismiss->setCursor(Qt::PointingHandCursor);
         const QString sink = c.sinkName;
@@ -1581,14 +1384,6 @@ void MainWindow::showChannelEffects(const QString &id, const QString &name) {
     w->activateWindow();
 }
 
-void MainWindow::onOutputPicked(int row, int comboIndex) {
-    if (row < 0 || row >= monitorOutputRows_.size()) return;
-    QComboBox *combo = monitorOutputRows_[row].combo;
-    if (!combo) return;
-    const QString name = combo->itemData(comboIndex).toString();
-    if (!name.isEmpty()) client_->setMonitorOutputAt(row, name);
-}
-
 void MainWindow::onAddMonitorOutput() {
     if (!client_->available()) return;
     const QList<MonitorOutputInfo> states = client_->monitorOutputStates();
@@ -1620,22 +1415,21 @@ void MainWindow::onAvailabilityChanged(bool available) {
     // The diagnostics button is deliberately NOT gated: with the daemon down
     // it opens and says so, which is more use than a dead control on the one
     // occasion someone is looking for an explanation.
-    const QList<QWidget *> gated = {clipguard_, hwMonitor_, outputsCard_,
-                                    manageProfiles_};
+    const QList<QWidget *> gated = {clipguard_, hwMonitor_, manageProfiles_};
     for (QWidget *w : gated)
         if (w) w->setEnabled(available);
-    for (const MonitorOutputRowUi &row : monitorOutputRows_) {
-        if (row.combo) row.combo->setEnabled(available);
-        if (row.addBtn) row.addBtn->setEnabled(available);
-        if (row.removeBtn) row.removeBtn->setEnabled(available);
-        if (row.mute) row.mute->setEnabled(available);
-        if (row.volume) row.volume->setEnabled(available);
-    }
-    if (streamMute_) streamMute_->setEnabled(available);
-    if (streamVolume_) streamVolume_->setEnabled(available);
+    // With no daemon there is nothing to route or mix: the cards go, and the
+    // row is left to its "Waiting for wavelined" line.
+    if (outputsBlock_) outputsBlock_->setVisible(available);
+    if (sidebarCard_) sidebarCard_->setVisible(available);
+    for (const MonitorOutputRowUi &row : monitorOutputRows_)
+        if (row.card) row.card->setEnabled(available);
+    if (streamCard_) streamCard_->setEnabled(available);
     for (auto *s : strips_) s->setEnabled(available);
     for (auto *s : masterStrips_) s->setEnabled(available);
     if (addMasterBtn_) addMasterBtn_->setEnabled(available);
+    // Coming back, the strips are rebuilt and syncAddMasterButton() decides.
+    if (removeMasterBtn_ && !available) removeMasterBtn_->setEnabled(false);
 
 
     if (available) {
@@ -1759,6 +1553,25 @@ void MainWindow::onRemoveMasterBus(const QString &id) {
     rebuildMasterStrips();
 }
 
+void MainWindow::onRemoveMasterBusMenu() {
+    if (!client_->available() || !removeMasterBtn_) return;
+    QList<QPair<QString, QString>> removable;
+    for (const MasterBusInfo &b : client_->masterBuses()) {
+        if (b.id == QLatin1String("mic")) continue;
+        removable.append({b.id, b.name.isEmpty() ? client_->deviceBrand() : b.name});
+    }
+    if (removable.isEmpty()) return;
+    // One to choose from is no choice: straight to the confirmation.
+    if (removable.size() == 1) {
+        onRemoveMasterBus(removable.first().first);
+        return;
+    }
+    QMenu menu(this);
+    for (const auto &[id, name] : removable)
+        menu.addAction(name, this, [this, id] { onRemoveMasterBus(id); });
+    menu.exec(removeMasterBtn_->mapToGlobal(QPoint(0, removeMasterBtn_->height())));
+}
+
 void MainWindow::onRebuildMasterCapture(const QString &id) {
     if (!client_->available() || id.isEmpty()) return;
 
@@ -1788,8 +1601,8 @@ void MainWindow::onRebuildMasterCapture(const QString &id) {
 
 void MainWindow::syncAddMasterButton() {
     ChannelStrip *last = nullptr;
-    if (!masterStripOrder_.isEmpty())
-        last = masterStrips_.value(masterStripOrder_.last());
+    if (!masterDisplayOrder_.isEmpty())
+        last = masterStrips_.value(masterDisplayOrder_.last());
 
     if (!addMasterBtn_) {
         addMasterBtn_ = squareOverlayButton(QStringLiteral("plus"),
@@ -1797,38 +1610,31 @@ void MainWindow::syncAddMasterButton() {
                                             this);
         connect(addMasterBtn_, &QPushButton::clicked, this, &MainWindow::onAddMasterBusMenu);
     }
+    if (!removeMasterBtn_) {
+        removeMasterBtn_ = squareOverlayButton(QStringLiteral("minus"),
+                                               tr("Remove an input device."),
+                                               this);
+        connect(removeMasterBtn_, &QPushButton::clicked, this,
+                &MainWindow::onRemoveMasterBusMenu);
+    }
 
-    for (auto *s : masterStrips_)
+    for (auto *s : masterStrips_) {
         s->setAddMasterOverlayButton(s == last ? addMasterBtn_ : nullptr);
+        s->setRemoveMasterOverlayButton(s == last ? removeMasterBtn_ : nullptr);
+    }
 
+    // The primary input cannot be removed, so with only it there is nothing
+    // for the "-" to do.
+    bool anyRemovable = false;
+    for (const MasterBusInfo &b : client_->masterBuses())
+        anyRemovable = anyRemovable || b.id != QLatin1String("mic");
     if (last) {
         addMasterBtn_->setEnabled(client_->available());
+        removeMasterBtn_->setEnabled(client_->available() && anyRemovable);
     } else {
         addMasterBtn_->hide();
+        removeMasterBtn_->hide();
     }
-}
-
-int MainWindow::channelStripInsertIndex() const {
-    int at = masterStripOrder_.size();
-    if (inputsSeparator_ && inputsSeparator_->isVisible()) ++at;
-    return at;
-}
-
-void MainWindow::syncInputsSeparator() {
-    if (!inputsSeparator_ || !stripRow_) return;
-    const bool show = !masterStrips_.isEmpty();
-    if (!show) {
-        inputsSeparator_->hide();
-        return;
-    }
-
-    const int wantIndex = masterStripOrder_.size();
-    const int curIndex = stripRow_->indexOf(inputsSeparator_);
-    if (curIndex != wantIndex) {
-        if (curIndex >= 0) stripRow_->removeWidget(inputsSeparator_);
-        stripRow_->insertWidget(wantIndex, inputsSeparator_);
-    }
-    inputsSeparator_->show();
 }
 
 void MainWindow::rebuildMasterStrips() {
@@ -1875,16 +1681,18 @@ void MainWindow::rebuildMasterStrips() {
                 }
             }
             syncAddMasterButton();
-            syncInputsSeparator();
+            syncGroupVisibility();
             return;
         }
     }
     masterStripOrder_ = order;
 
     if (addMasterBtn_) addMasterBtn_->setParent(this);
+    // The "-" rides on the same card, and would be deleted with it.
+    if (removeMasterBtn_) removeMasterBtn_->setParent(this);
 
     for (auto *s : masterStrips_) {
-        stripRow_->removeWidget(s);
+        inputsRow_->removeWidget(s);
         s->deleteLater();
     }
     masterStrips_.clear();
@@ -1892,9 +1700,11 @@ void MainWindow::rebuildMasterStrips() {
     // refreshMasterStrip() fills it back in for whatever replaces them.
     masterMonitor_.clear();
 
-    int at = 0;
-    for (int slot = 0; slot < order.size(); ++slot) {
-        const QString &id = order[slot];
+    // Laid out in the order the user put them in; numbered and coloured in
+    // the daemon's, which is the device's own.
+    masterDisplayOrder_ = displayedMasterOrder(order);
+    for (const QString &id : masterDisplayOrder_) {
+        const int slot = order.indexOf(id);
         MasterBusInfo info;
         for (const MasterBusInfo &b : buses) {
             if (b.id == id) {
@@ -1918,13 +1728,8 @@ void MainWindow::rebuildMasterStrips() {
         connect(strip, &ChannelStrip::identityClicked, this, [this, id] {
             editCardIdentity(QStringLiteral("master"), id);
         });
-        {
-            const QString cardKey = Theme::masterCardKey(id);
-            strip->setFadersLinked(loadFadersLinked(cardKey));
-            connect(strip, &ChannelStrip::fadersLinkedChanged, this,
-                    [cardKey](bool on) { saveFadersLinked(cardKey, on); });
-        }
         strip->setMasterSlotNumber(slot + 1);
+        wireStripReorder(strip, true);
         strip->enableEditableTitle();
         connect(strip, &ChannelStrip::displayNameEdited, this,
                 [this, id](const QString &name) { client_->setMasterName(id, name); });
@@ -1932,14 +1737,15 @@ void MainWindow::rebuildMasterStrips() {
             strip->enableMasterRebuild(true);
             connect(strip, &ChannelStrip::masterRebuildRequested, this,
                     [this, id] { onRebuildMasterCapture(id); });
+            // The rack glyph where the trash used to be: removing an input is
+            // the "-" under the "+" now.
+            strip->enableMasterRack(true);
+            connect(strip, &ChannelStrip::rackRequested, this,
+                    [this, id, name] { showVirtualRack(id, name); });
         }
         if (primary) {
             strip->setToolTip(tr("Your primary input.\n"
                                  "Stream is how loudly your audience hears you."));
-        } else {
-            strip->enableMasterDelete(true);
-            connect(strip, &ChannelStrip::masterDeleteRequested, this,
-                    [this, id] { onRemoveMasterBus(id); });
         }
         // The Monitor half of both signals also drives this card's top meter,
         // so the cache is updated here rather than waiting for the daemon's
@@ -1960,16 +1766,10 @@ void MainWindow::rebuildMasterStrips() {
                     client_->setMasterMicMixMuted(id, mix, m);
                 });
         strip->setMicMeterActive(true);
-        strip->setMeterTooltips(
-            tr("What you hear from this input device."),
-            primary ? tr("Your microphone, after noise suppression and EQ. This is "
-                         "what the mixes receive.")
-                    : tr("This microphone, after noise suppression and EQ. This is "
-                         "what the mixes receive."));
         strip->setMonitorColumnTip(
             tr("How loudly you hear this microphone in the Monitor mix.\n"
                "Use the ear toggle to enable monitoring. To change everything "
-               "you hear on a device, use that device's Monitor mix level below."),
+               "you hear on a device, use that device's Monitor mix card."),
             tr("Mute this microphone in the Monitor mix.\n"
                "Your audience is unaffected."));
         strip->enableMicMonitorButton();
@@ -2004,20 +1804,19 @@ void MainWindow::rebuildMasterStrips() {
                               "Your settings are kept, so turning it back on restores "
                               "the chain.\n"
                               "The gear beside it opens Global Effects.\n"
-                              "Right-click cycles the states in reverse.\n"
-                              "Middle-click opens the Creative FX Virtual Rack."));
+                              "Right-click cycles the states in reverse."));
             connectMasterEffectsButton(fx, client_, id, strip);
-            connect(fx, &IconToggle::middleClicked, this,
-                    [this, id, name] { showVirtualRack(id, name); });
         }
 
-        stripRow_->insertWidget(at++, strip);
+        connect(strip, &ChannelStrip::baseWidthChanged, this, &MainWindow::updateRowStretch);
+        inputsRow_->addWidget(strip);
         masterStrips_.insert(id, strip);
         profileApplied_ = false;
     }
 
     syncAddMasterButton();
-    syncInputsSeparator();
+    syncGroupVisibility();
+    updateRowStretch();
     emptyLabel_->setVisible(masterStrips_.isEmpty());
 }
 
@@ -2155,10 +1954,73 @@ void MainWindow::applyCardLooks() {
         it.value()->setIdentityBadge(Theme::channelIconName(it.key()),
                                      Theme::channelColor(it.key()));
     }
+    for (int i = 0; i < monitorOutputRows_.size(); ++i) {
+        if (MixCard *card = monitorOutputRows_[i].card) {
+            const QString key = monitorMixCardKey(i);
+            card->setIdentity(Theme::cardIcon(key, QStringLiteral("headphones")),
+                              Theme::cardColor(key, monitorMixColor(i)));
+        }
+    }
+    if (streamCard_)
+        streamCard_->setIdentity(QStringLiteral("stream"),
+                                 Theme::cardColor(kStreamMixCardKey, kStreamMixColor));
+    if (sidebarCard_) {
+        const QColor color = Theme::cardColor(kAppSettingsCardKey, kAppSettingsColor);
+        sidebarCard_->setBorderColor(color);
+    }
 }
 
 void MainWindow::editCardIdentity(const QString &kind, const QString &id) {
     if (!client_->available()) return;
+
+    // The mixes and Application Settings: no name to edit, and for the Stream
+    // mix and Application Settings no glyph either -- the stream sign and the
+    // gear are what they are. Only the look is stored.
+    if (kind == QLatin1String("mix") || kind == QLatin1String("stream")
+        || kind == QLatin1String("app-settings")) {
+        QString key;
+        QString title;
+        QColor defColor;
+        QString defIcon;
+        bool iconEditable = false;
+        if (kind == QLatin1String("mix")) {
+            const int index = id.toInt();
+            key = monitorMixCardKey(index);
+            title = tr("Monitor mix #%1").arg(index + 1);
+            defColor = monitorMixColor(index);
+            defIcon = QStringLiteral("headphones");
+            iconEditable = true;
+        } else if (kind == QLatin1String("stream")) {
+            key = kStreamMixCardKey;
+            title = tr("Stream mix");
+            defColor = kStreamMixColor;
+            defIcon = QStringLiteral("stream");
+        } else {
+            key = kAppSettingsCardKey;
+            title = tr("Application Settings");
+            defColor = kAppSettingsColor;
+            defIcon = QStringLiteral("gear");
+        }
+        const MixerClient::CardAppearance saved = client_->cardAppearances().value(key);
+        CardIdentityDialog dlg(tr("Card — %1").arg(title), title, QColor(saved.color),
+                               iconEditable ? saved.icon : QString(), defColor, defIcon,
+                               this);
+        dlg.setNameEditable(false);
+        dlg.setIconEditable(iconEditable);
+        if (dlg.exec() != QDialog::Accepted) return;
+        const QColor color = dlg.color();
+        const QString icon = iconEditable ? dlg.icon() : QString();
+        client_->setCardAppearance(
+            key, color.isValid() ? color.name(QColor::HexRgb) : QString(), icon);
+        Theme::CardLook look;
+        look.color = color;
+        look.icon = icon;
+        Theme::setCardLook(key, look);
+        applyCardLooks();
+        client_->refresh();
+        return;
+    }
+
     const bool master = kind == QLatin1String("master");
     const QString key =
         master ? Theme::masterCardKey(id) : Theme::channelCardKey(id);
@@ -2216,20 +2078,8 @@ void MainWindow::applyMasterMonitorState(const QString &masterId) {
     ChannelStrip *strip = masterStrips_.value(masterId);
     if (!strip) return;
     const MasterMonitorUi m = masterMonitor_.value(masterId);
-    const bool live = m.monitoring && !m.muted;
+    const bool live = m.monitoring && !m.muted && !monitorCutForSpeakers_;
     strip->setMainMeterActive(live);
-    strip->setMainMeterTooltip(
-        live ? tr("What you hear from this input device: its send into the "
-                  "Monitor mix, at this card's Monitor fader.")
-             : m.monitoring
-                   ? tr("Muted in the Monitor mix, so there is nothing to hear "
-                        "from this input device.\n"
-                        "Your audience is unaffected.")
-                   : tr("Not monitored, so there is nothing to hear from this "
-                        "input device.\n"
-                        "Turn on the ear toggle to monitor it. Hardware direct "
-                        "monitoring never enters the mixer and cannot be "
-                        "metered here."));
 }
 
 void MainWindow::loadChannelOrder() {
@@ -2261,12 +2111,12 @@ QList<ChannelInfo> MainWindow::orderedChannels() const {
 }
 
 void MainWindow::saveChannelOrderFromRow() {
-    if (!stripRow_) return;
+    if (!channelsRow_) return;
     // Read back from the row rather than from a model of it: the live drag
     // moves the widgets, so the widgets are the truth by the time this runs.
     QStringList order;
-    for (int i = 0; i < stripRow_->count(); ++i) {
-        QWidget *w = stripRow_->itemAt(i)->widget();
+    for (int i = 0; i < channelsRow_->count(); ++i) {
+        QWidget *w = channelsRow_->itemAt(i)->widget();
         if (!w) continue;
         auto *strip = qobject_cast<ChannelStrip *>(w);
         if (!strip) continue;
@@ -2283,56 +2133,191 @@ void MainWindow::saveChannelOrderFromRow() {
     saveChannelOrderSetting(order);
 }
 
-int MainWindow::channelDropIndex(const QPoint &hostPos) const {
-    // The gap the cursor is nearest, expressed as a layout index. Each card
-    // claims the half of itself nearest the gap in question, which is what
-    // makes the card under the cursor swap rather than refuse to move.
-    int index = -1;
-    for (int i = 0; i < stripRow_->count(); ++i) {
-        auto *strip = qobject_cast<ChannelStrip *>(stripRow_->itemAt(i)->widget());
-        if (!strip || !strips_.contains(strip->channelId())) continue;
-        if (hostPos.x() < strip->geometry().center().x()) return i;
-        index = i + 1;
-    }
-    // Past the centre of every card: the gap after the last one.
-    return index;
+void MainWindow::wireStripReorder(ChannelStrip *strip, bool master) {
+    strip->enableDragHandle();
+    connect(strip, &ChannelStrip::reorderStarted, this,
+            [this, strip, master](const QPoint &press, bool wholeGroup) {
+                // With Control held, the whole group goes.
+                if (wholeGroup) {
+                    beginUnitMove(master ? inputsHost_ : channelsHost_, press);
+                    return;
+                }
+                // Only cards of its own kind.
+                QBoxLayout *row = master ? inputsRow_ : channelsRow_;
+                QList<QWidget *> group;
+                for (int i = 0; i < row->count(); ++i)
+                    if (auto *s = qobject_cast<ChannelStrip *>(row->itemAt(i)->widget()))
+                        group << s;
+                shuffle_->begin(row, strip, group, press, [this, master] {
+                    if (master) saveMasterOrderFromRow();
+                    else saveChannelOrderFromRow();
+                    // Back in the layout, the card needs its share of the
+                    // spare room again.
+                    updateRowStretch();
+                });
+            });
+    connect(strip, &ChannelStrip::reorderMoved, this,
+            [this](const QPoint &pos) { shuffle_->move(pos); });
+    connect(strip, &ChannelStrip::reorderEnded, this, [this] { shuffle_->end(); });
 }
 
-bool MainWindow::handleStripDrag(QEvent *event) {
-    switch (event->type()) {
-    case QEvent::DragEnter:
-    case QEvent::DragMove: {
-        auto *de = static_cast<QDragMoveEvent *>(event);
-        if (!de->mimeData()->hasFormat(
-                QString::fromLatin1(ChannelStrip::dragMimeType())))
-            return false;
-        const QString id = QString::fromUtf8(de->mimeData()->data(
-            QString::fromLatin1(ChannelStrip::dragMimeType())));
-        ChannelStrip *strip = strips_.value(id);
-        if (!strip) return false;
-        de->setDropAction(Qt::MoveAction);
-        de->accept();
+QStringList MainWindow::displayedMasterOrder(const QStringList &daemonOrder) const {
+    // Remembered ones first, in the remembered order; anything never moved
+    // after them, as the daemon has it.
+    const QStringList saved = QSettings().value(QStringLiteral("inputOrder")).toStringList();
+    QStringList out;
+    for (const QString &id : saved)
+        if (daemonOrder.contains(id)) out << id;
+    for (const QString &id : daemonOrder)
+        if (!out.contains(id)) out << id;
+    return out;
+}
 
-        // Reorder as the cursor moves rather than only on drop: the row is
-        // its own preview, so there is no separate insertion marker to draw
-        // and no way for the two to disagree.
-        const int want = channelDropIndex(de->position().toPoint());
-        const int have = stripRow_->indexOf(strip);
-        if (want >= 0 && have >= 0 && want != have && want != have + 1) {
-            stripRow_->removeWidget(strip);
-            stripRow_->insertWidget(want > have ? want - 1 : want, strip);
+void MainWindow::saveMasterOrderFromRow() {
+    QStringList order;
+    for (int i = 0; i < inputsRow_->count(); ++i) {
+        auto *s = qobject_cast<ChannelStrip *>(inputsRow_->itemAt(i)->widget());
+        if (s && masterStrips_.value(s->channelId()) == s) order << s->channelId();
+    }
+    masterDisplayOrder_ = order;
+    // Kept whole, removed devices included, so one plugged back in returns to
+    // where it was.
+    QStringList saved = QSettings().value(QStringLiteral("inputOrder")).toStringList();
+    for (const QString &id : saved)
+        if (!order.contains(id)) order << id;
+    QSettings().setValue(QStringLiteral("inputOrder"), order);
+    // The "+" and "-" ride on whichever card is last now.
+    syncAddMasterButton();
+}
+
+namespace {
+// A Monitor mix is remembered by the device it plays on: its index moves when
+// one before it is removed, and no two mixes share a device.
+QString monitorOrderKey(const QList<MonitorOutputInfo> &states, int i) {
+    if (i < states.size() && !states[i].sink.isEmpty()) return states[i].sink;
+    return QStringLiteral("#%1").arg(i);
+}
+}  // namespace
+
+QList<int> MainWindow::displayedMonitorOrder(const QList<MonitorOutputInfo> &states,
+                                             int count) const {
+    const QStringList saved =
+        QSettings().value(QStringLiteral("monitorOrder")).toStringList();
+    QList<int> out;
+    for (const QString &key : saved)
+        for (int i = 0; i < count; ++i)
+            if (!out.contains(i) && monitorOrderKey(states, i) == key) out << i;
+    for (int i = 0; i < count; ++i)
+        if (!out.contains(i)) out << i;
+    return out;
+}
+
+void MainWindow::seatMonitorAddButton() {
+    if (!addMonitorBtn_ || !monitorCardsRow_) return;
+    // On whichever card is last in the row, not whichever is last by number.
+    MixCard *last = nullptr;
+    for (int i = 0; i < monitorCardsRow_->count(); ++i)
+        if (auto *c = qobject_cast<MixCard *>(monitorCardsRow_->itemAt(i)->widget())) last = c;
+    for (const MonitorOutputRowUi &row : monitorOutputRows_)
+        if (row.card && row.card != last) row.card->setAddButton(nullptr);
+    if (last) last->setAddButton(addMonitorBtn_);
+}
+
+void MainWindow::commitMonitorOrderFromRow() {
+    // Only the window's order: nothing goes to the daemon, so nothing about
+    // the mixes themselves changes.
+    const QList<MonitorOutputInfo> states =
+        client_->available() ? client_->monitorOutputStates() : QList<MonitorOutputInfo>{};
+    QStringList order;
+    for (int i = 0; i < monitorCardsRow_->count(); ++i) {
+        QWidget *w = monitorCardsRow_->itemAt(i)->widget();
+        for (int r = 0; r < monitorOutputRows_.size(); ++r)
+            if (monitorOutputRows_[r].card == w) order << monitorOrderKey(states, r);
+    }
+    // Kept whole, devices not in a mix right now included, so one that comes
+    // back returns to where it was.
+    for (const QString &key : QSettings().value(QStringLiteral("monitorOrder")).toStringList())
+        if (!order.contains(key) && !key.startsWith(QLatin1Char('#'))) order << key;
+    QSettings().setValue(QStringLiteral("monitorOrder"), order);
+    seatMonitorAddButton();
+    updateRowStretch();
+}
+
+bool MainWindow::handleMonitorOutputDrag(QObject *watched, QEvent *event) {
+    int row = -1;
+    bool onBadge = false;
+    for (int i = 0; i < monitorOutputRows_.size(); ++i) {
+        MixCard *card = monitorOutputRows_[i].card;
+        if (!card) continue;
+        if (watched == card->handle()) {
+            row = i;
+            onBadge = true;
+            break;
         }
+        if (watched == card) {
+            row = i;
+            break;
+        }
+    }
+    if (row < 0) return false;
+    MixCard *card = monitorOutputRows_[row].card;
+
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: {
+        auto *e = static_cast<QMouseEvent *>(event);
+        if (e->button() != Qt::LeftButton || shuffle_->busy()) return false;
+        monitorDragFrom_ = row;
+        monitorDragging_ = false;
+        monitorDragStart_ = e->globalPosition().toPoint();
         return true;
     }
-    case QEvent::Drop: {
-        auto *de = static_cast<QDropEvent *>(event);
-        if (!de->mimeData()->hasFormat(
-                QString::fromLatin1(ChannelStrip::dragMimeType())))
-            return false;
-        de->setDropAction(Qt::MoveAction);
-        de->accept();
-        // The row already shows the answer; all that is left is to keep it.
-        saveChannelOrderFromRow();
+    case QEvent::MouseMove: {
+        if (monitorDragFrom_ != row) return false;
+        auto *e = static_cast<QMouseEvent *>(event);
+        const QPoint pos = e->globalPosition().toPoint();
+        if (monitorDragging_) {
+            shuffle_->move(pos);
+            return true;
+        }
+        if ((pos - monitorDragStart_).manhattanLength() < QApplication::startDragDistance())
+            return true;
+        // One mix has nothing to trade places with -- unless the whole group
+        // is going.
+        if (monitorOutputRows_.size() < 2 && !(e->modifiers() & Qt::ControlModifier)) {
+            monitorDragFrom_ = -1;
+            return true;
+        }
+        monitorDragging_ = true;
+        card->setCursor(Qt::ClosedHandCursor);
+        if (e->modifiers() & Qt::ControlModifier) {
+            // With Control held, every mix goes, the Stream mix with them.
+            beginUnitMove(outputsBlock_, monitorDragStart_);
+        } else {
+            QList<QWidget *> group;
+            for (int i = 0; i < monitorCardsRow_->count(); ++i)
+                if (QWidget *w = monitorCardsRow_->itemAt(i)->widget()) group << w;
+            shuffle_->begin(monitorCardsRow_, card, group, monitorDragStart_,
+                            [this] { commitMonitorOrderFromRow(); });
+        }
+        shuffle_->move(pos);
+        return true;
+    }
+    case QEvent::MouseButtonRelease: {
+        if (monitorDragFrom_ != row) return false;
+        monitorDragFrom_ = -1;
+        if (monitorDragging_) {
+            monitorDragging_ = false;
+            card->unsetCursor();
+            shuffle_->end();
+            return true;
+        }
+        // Pressed and let go without moving far enough: a click, which on
+        // the badge opens the device menu. After this event, not inside it:
+        // the menu runs its own loop, and a Changed landing there can rebuild
+        // the cards -- this badge among them -- while its own event is still
+        // being delivered.
+        if (onBadge)
+            QTimer::singleShot(0, this, [this, row] { showMonitorOutputMenu(row); });
         return true;
     }
     default:
@@ -2341,12 +2326,6 @@ bool MainWindow::handleStripDrag(QEvent *event) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
-    // Anything that moves the sidebar or what is under it re-lays the overlay.
-    if ((watched == bodyWidget_ || watched == sidebar_ || watched == sidebarCard_
-         || watched == inputsWell_)
-        && (event->type() == QEvent::Resize || event->type() == QEvent::Show
-            || event->type() == QEvent::Hide || event->type() == QEvent::Move))
-        layoutSidebarOverlay();
     // Monarchy's look: the margin round the window resizes it, and the header
     // row stands in for the titlebar it does not have.
     if (monarchyCentral_ && watched == monarchyCentral_
@@ -2355,7 +2334,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     if (monarchyHeader_ && watched == monarchyHeader_
         && Monarchy::handleTitlebarEvent(this, event))
         return true;
-    if (stripHost_ && watched == stripHost_ && handleStripDrag(event))
+    if (handleMonitorOutputDrag(watched, event))
+        return true;
+    if (handleBodyDrag(watched, event))
         return true;
     return QMainWindow::eventFilter(watched, event);
 }
@@ -2366,9 +2347,8 @@ void MainWindow::rebuildStrips() {
     const auto channels = orderedChannels();
     if (strips_.size() == channels.size()) return;
 
-    for (auto *s : strips_) { stripRow_->removeWidget(s); s->deleteLater(); }
+    for (auto *s : strips_) { channelsRow_->removeWidget(s); s->deleteLater(); }
     strips_.clear();
-    int at = channelStripInsertIndex();
     for (const auto &c : channels) {
         auto *strip = new ChannelStrip(c.id, c.name, nullptr);
         // Same identity affordances as an input device: the tile opens the
@@ -2376,16 +2356,11 @@ void MainWindow::rebuildStrips() {
         connect(strip, &ChannelStrip::identityClicked, this, [this, id = c.id] {
             editCardIdentity(QStringLiteral("channel"), id);
         });
-        {
-            const QString cardKey = Theme::channelCardKey(c.id);
-            strip->setFadersLinked(loadFadersLinked(cardKey));
-            connect(strip, &ChannelStrip::fadersLinkedChanged, this,
-                    [cardKey](bool on) { saveFadersLinked(cardKey, on); });
-        }
-        // Channel cards only. The masters are ordered by the daemon -- slot 1
-        // is the primary bus and the numbering means something -- so dragging
-        // one somewhere else would be a lie the next refresh undoes.
-        strip->enableDragHandle();
+        // Its Creative FX rack, opposite the gear.
+        strip->enableChannelRack();
+        connect(strip, &ChannelStrip::rackRequested, this,
+                [this, id = c.id, name = c.name] { showChannelRack(id, name); });
+        wireStripReorder(strip, false);
         strip->enableEditableTitle();
         connect(strip, &ChannelStrip::displayNameEdited, this,
                 [this, id = c.id](const QString &name) {
@@ -2419,9 +2394,12 @@ void MainWindow::rebuildStrips() {
         if (IconToggle *fx = strip->effectsButton()) {
             connectEffectsButton(fx, client_, c.id, strip);
         }
-        stripRow_->insertWidget(at++, strip);
+        connect(strip, &ChannelStrip::baseWidthChanged, this, &MainWindow::updateRowStretch);
+        channelsRow_->addWidget(strip);
         strips_.insert(c.id, strip);
     }
+    syncGroupVisibility();
+    updateRowStretch();
 }
 
 void MainWindow::onLevels() {
@@ -2443,48 +2421,40 @@ void MainWindow::onLevels() {
         const double src =
             meterPosition(l.value(it.key() + QStringLiteral("-src"), 0.0));
         it.value()->setMicLevel(src);
-        // Top bar: this device's own send into the Monitor mix -- what you
-        // hear from *this* input, and nothing else. It used to show the whole
-        // Monitor mix, which put an identical bar on every input device and
-        // moved it for audio that card had no part in.
-        //
-        // The send is a loopback carrying `src` at this card's Monitor fader,
-        // muted while the ear toggle is off, so it is the same pre-fader
-        // formula the monitor output rows use below.
-        const MasterMonitorUi m = masterMonitor_.value(it.key());
-        it.value()->setLevel(m.monitoring && !m.muted ? src * m.volume : 0.0);
+        // Each mix fader's track: this device's own send into that mix, which
+        // is `src` at the card's fader. The card scales it itself, and holds
+        // the Monitor track at zero while the ear toggle is off -- see
+        // applyMasterMonitorState().
+        it.value()->setLevel(src);
     }
 
-    for (const MonitorOutputRowUi &row : monitorOutputRows_) {
-        if (!row.meter) continue;
-        if (!row.meter->isEnabled()) {
-            row.meter->setLevel(0.0);
-            continue;
+    // Each application's level, for Application Settings' slider tracks.
+    if (soundSharingTab_ && soundSharingTab_->isVisible()) {
+        QHash<uint, double> apps;
+        for (auto it = l.begin(); it != l.end(); ++it) {
+            if (!it.key().startsWith(QLatin1String("app-"))) continue;
+            bool ok = false;
+            const uint id = it.key().mid(4).toUInt(&ok);
+            if (ok) apps.insert(id, meterPosition(it.value()));
         }
-        double level = monitorMixLevel;
-        // monitor-mix is upstream of each output's fader and mute; scale so the
-        // bar reflects what would come out of this device, not the shared bus.
-        if (row.mute && row.mute->isChecked())
-            level = 0.0;
-        else if (row.volume)
-            level *= row.volume->value() / 100.0;
-        row.meter->setLevel(level);
+        soundSharingTab_->setAppLevels(apps);
     }
+
+    // monitor-mix is upstream of each output's fader and mute; the card
+    // scales it, so its bar is what leaves for that device.
+    for (const MonitorOutputRowUi &row : monitorOutputRows_)
+        if (row.card) row.card->setLevel(monitorMixLevel);
     // Stream volume is channelVolumes on the sink, so the probe already hears
     // post-fader audio. Monitor meters do meterPosition(pre)*fader instead.
     // Applying the log curve to a post-fader peak (or also multiplying again)
     // will not match — undo the fader, then use the same formula as Monitor.
-    {
-        const double fader =
-            (streamMute_ && streamMute_->isChecked())
-                ? 0.0
-                : (streamVolume_ ? streamVolume_->value() / 100.0 : 1.0);
+    if (streamCard_) {
+        const double fader = streamCard_->muted() ? 0.0 : streamCard_->volume();
         if (fader <= 0.0) {
-            streamMeter_->setLevel(0.0);
+            streamCard_->setLevel(0.0);
         } else {
             const double post = l.value(QStringLiteral("stream-mix"), 0.0);
-            const double pre = std::min(1.0, post / fader);
-            streamMeter_->setLevel(meterPosition(pre) * fader);
+            streamCard_->setLevel(meterPosition(std::min(1.0, post / fader)));
         }
     }
 }
@@ -2498,8 +2468,10 @@ void MainWindow::applyDeviceProfile() {
 
     setWindowTitle(tr("Waveline"));
 
-    if (streamMixName_)
-        streamMixName_->setFullText(tr("%1 Stream Mix").arg(brand));
+    if (streamCard_)
+        streamCard_->setDescription(
+            tr("%1 Stream Mix: a virtual device, not a speaker. Point your "
+               "recorder or streaming software at it.").arg(brand));
 
     for (auto *strip : masterStrips_)
         strip->setGainStyle(ChannelStrip::GainStyle::InputLevel);
@@ -2529,9 +2501,13 @@ void MainWindow::onChanged() {
     }
 
     const QList<MasterBusInfo> buses = client_->masterBuses();
+    monitorCutForSpeakers_ = client_->monitorCancelledBySpeakers();
     for (const MasterBusInfo &b : buses) {
-        if (auto *s = masterStrips_.value(b.id))
+        if (auto *s = masterStrips_.value(b.id)) {
             refreshMasterStrip(b.id, s);
+            s->setMicMonitorBlocked(monitorCutForSpeakers_);
+            applyMasterMonitorState(b.id);
+        }
     }
 
     for (const auto &c : client_->channels()) {
@@ -2555,7 +2531,7 @@ void MainWindow::onChanged() {
             s->setMicSend(client_->channelMicSend(c.id));
             const bool hasMic = client_->channelMicSource(c.id);
             s->setMicMeterActive(hasMic);
-            s->setMicControlsActive(hasMic);
+            s->setMicColumnShown(hasMic);
             s->setMicMonitorButtonVisible(hasMic);
             if (IconToggle *ear = s->micMonitorButton()) {
                 QSignalBlocker b(ear);

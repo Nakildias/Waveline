@@ -909,6 +909,18 @@ void MixerClient::setAutoPauseNoiseSuppression(bool on) {
     call("SetAutoPauseNoiseSuppression", {on});
 }
 
+bool MixerClient::cancelMonitorOnSpeakers() const {
+    return get<bool>("CancelMonitorOnSpeakers", true);
+}
+
+void MixerClient::setCancelMonitorOnSpeakers(bool on) {
+    call("SetCancelMonitorOnSpeakers", {on});
+}
+
+bool MixerClient::monitorCancelledBySpeakers() const {
+    return get<bool>("MonitorCancelledBySpeakers", false);
+}
+
 bool MixerClient::noiseSuppressionPaused() const {
     return get<bool>("NoiseSuppressionPaused", false);
 }
@@ -976,6 +988,10 @@ void MixerClient::setMonitorOutput(const QString &sinkName) {
 
 void MixerClient::setMonitorOutputAt(int index, const QString &sinkName) {
     call("SetMonitorOutputAt", {index, sinkName});
+}
+
+void MixerClient::swapMonitorOutputs(int a, int b) {
+    call("SwapMonitorOutputs", {a, b});
 }
 
 void MixerClient::addMonitorOutput(const QString &sinkName) {

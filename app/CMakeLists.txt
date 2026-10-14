@@ -204,6 +204,10 @@ qt_add_executable(waveline-mixer
     src/ui/levelmeter.cpp
     src/ui/levelmeter.h
     src/ui/channelstrip.cpp
+    src/ui/cardshuffle.cpp
+    src/ui/cardshuffle.h
+    src/ui/mixcard.cpp
+    src/ui/mixcard.h
     src/ui/channelstrip.h
     src/ui/cardidentity.cpp
     src/ui/cardidentity.h
@@ -247,6 +251,19 @@ qt_add_executable(waveline-mixer
     src/ui/monarchy/chrome.h
     src/ui/monarchy/menus.cpp
     src/ui/monarchy/menus.h
+    # Monarchy's scroll engine, ported: see src/ui/monarchy/scroll_engine.h.
+    src/ui/monarchy/scroll_engine.cpp
+    src/ui/monarchy/scroll_engine.h
+    src/ui/monarchy/scroll_input.cpp
+    src/ui/monarchy/scroll_input.h
+    src/ui/monarchy/scroll_settings.cpp
+    src/ui/monarchy/scroll_settings.h
+    src/ui/monarchy/smooth_scroller.cpp
+    src/ui/monarchy/smooth_scroller.h
+    src/ui/monarchy/scroll_bar_auto_hide.cpp
+    src/ui/monarchy/scroll_bar_auto_hide.h
+    src/ui/monarchy/scroll_bars.cpp
+    src/ui/monarchy/scroll_bars.h
 )
 target_include_directories(waveline-mixer PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -295,6 +312,9 @@ qt_add_resources(waveline-mixer "waveline-icons"
         src/icons/system.svg
         src/icons/sfx.svg
         src/icons/trash.svg
+        src/icons/rack.svg
+        src/icons/headset.svg
+        src/icons/earbuds.svg
         src/icons/tuning-fork.svg
         src/icons/world.svg
         src/icons/x.svg

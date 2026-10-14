@@ -15,6 +15,7 @@
 #include <QColor>
 #include <QHash>
 #include <QMainWindow>
+#include <QPointer>
 #include <QStringList>
 #include <QTimer>
 
@@ -33,6 +34,9 @@ struct OutputInfo;
 class CompanionWindow;
 class ProfilesWindow;
 class SoundboardWindow;
+class CardShuffle;
+class IconTile;
+class MixCard;
 class SoundSharingTab;
 class StatusDot;
 class VirtualRackWindow;
@@ -69,8 +73,8 @@ public:
 protected:
     void showEvent(QShowEvent *) override;
     void hideEvent(QHideEvent *) override;
-    // Drag-and-drop reordering of the channel cards happens on the strip row;
-    // see handleStripDrag().
+    // The Monitor mix cards' badges and bodies, for clicks and moves; see
+    // handleMonitorOutputDrag().
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
@@ -79,12 +83,12 @@ private slots:
     void onAvailabilityChanged(bool available);
     void onHardwareMonitorMoved(int value);
     void onHardwareMonitorReleased();
-    void onOutputPicked(int row, int comboIndex);
     void onAddMonitorOutput();
     void onRemoveMonitorOutput(int index);
     void showProfiles();
     void showGlobalEffects(const QString &masterId = QStringLiteral("mic"));
     void showVirtualRack(const QString &masterId, const QString &name);
+    void showChannelRack(const QString &channelId, const QString &name);
     void showChannelEffects(const QString &id, const QString &name);
     void showAbout();
     void showLatencyDiagnostics();
@@ -95,6 +99,8 @@ private slots:
     void onAddMasterBus(const QString &busType, const QString &deviceMatch);
     void onAddMasterBusMenu();
     void onRemoveMasterBus(const QString &id);
+    // The "-" under the "+": which input to remove, then onRemoveMasterBus().
+    void onRemoveMasterBusMenu();
     void onRebuildMasterCapture(const QString &id);
 
 private:
@@ -116,13 +122,8 @@ private:
     // Monarchy's window opacity setting moves.
     void applyMonarchyStyle();
     QWidget *buildInputs();
+    // Application Settings and the mixes, as cards at the end of the row.
     QWidget *buildOutputs();
-    QWidget *buildSidebar();
-    // The Application Settings sidebar is laid over the right-hand end of the
-    // row of cards rather than beside it: this places it, pads the row and
-    // Outputs by the room it takes, and masks the cards out from under its
-    // card so they show only through its rounded corners.
-    void layoutSidebarOverlay();
     Section *buildSoundSharingSection();
     Section *buildHardwareSection();
 
@@ -149,8 +150,27 @@ private:
     // The panel behind a card's icon tile: name, colour, icon.
     void editCardIdentity(const QString &kind, const QString &id);
     void syncAddMasterButton();
-    void syncInputsSeparator();
-    int channelStripInsertIndex() const;
+    // Hides the input device and channel groups while they have no cards, so
+    // they leave no gap in the row.
+    void syncGroupVisibility();
+    // The row is four groups -- the mixes, the input devices, the channels and
+    // Application Settings -- each one widget, in an order the user picks by
+    // dragging Application Settings or Control-dragging any card of a group.
+    QWidget *rowUnit(const QString &name) const;
+    void beginUnitMove(QWidget *unit, const QPoint &press);
+    QWidget *inputsHost_ = nullptr;
+    QHBoxLayout *inputsRow_ = nullptr;
+    QWidget *channelsHost_ = nullptr;
+    QHBoxLayout *channelsRow_ = nullptr;
+    // The Stream mix and Application Settings are moved by their bodies; see
+    // handleBodyDrag().
+    bool handleBodyDrag(QObject *watched, QEvent *event);
+    QPointer<QWidget> bodyDrag_;
+    QPoint bodyDragStart_;
+    bool bodyDragging_ = false;
+    // Shares any room the row has to spare among the cards, in proportion to
+    // the width each needs. Run whenever a card comes, goes or changes width.
+    void updateRowStretch();
     // Puts the installed microphone's identity through the whole window: the
     // title, the wordmark's suffix, the name the Stream mix is published
     // under, and whether the hardware panel and the hardware monitor mode
@@ -167,18 +187,16 @@ private:
     // Maps an RMS amplitude onto a 0..1 meter position.
     static double meterPosition(double rms);
     void syncMonitorOutputUi();
-    void refreshMonitorOutputCombos();
+    // Each Monitor mix card's device: its name, and whether it is plugged in.
+    void refreshMonitorOutputDevices();
     void refreshMonitorOutputControls();
-    // Fills one row's device picker, leaving out devices other rows already
-    // own -- one output device drives exactly one Monitor mix. Takes the lists
-    // the caller already fetched: every accessor here is a D-Bus round trip.
-    void fillMonitorOutputCombo(QComboBox *combo, int index,
-                                const QList<MonitorOutputInfo> &states,
-                                const QList<OutputInfo> &outs);
+    // The menu a Monitor mix card's badge opens: the devices it can play on,
+    // leaving out those other mixes already own -- one output device drives
+    // exactly one Monitor mix -- and Remove, for any but the first.
+    void showMonitorOutputMenu(int index);
     // A device no Monitor mix has claimed yet, or empty when all are taken.
     static QString freeMonitorOutputDevice(const QList<MonitorOutputInfo> &states,
                                            const QList<OutputInfo> &outs);
-    QString monitorOutputLabel(int index, int total) const;
 
     MixerClient *client_ = nullptr;
 
@@ -220,11 +238,11 @@ private:
     QWidget *bodyWidget_ = nullptr;
     CardBase *inputsWell_ = nullptr;
     Section *sidebarCard_ = nullptr;
-    QVBoxLayout *outputsLayout_ = nullptr;
-    bool inOverlayLayout_ = false;
+    // The row's scroll area, for --scroll (see scrollSidebar()).
+    QScrollArea *stripScroll_ = nullptr;
     QLabel *emptyLabel_ = nullptr;
-    QWidget *inputsSeparator_ = nullptr;
     QPushButton *addMasterBtn_ = nullptr;
+    QPushButton *removeMasterBtn_ = nullptr;
     QHash<QString, ChannelStrip *> masterStrips_;
     QStringList masterStripOrder_;
     // What each input device's own monitor send is doing. Cached rather than
@@ -236,6 +254,9 @@ private:
         double volume = 1.0;
     };
     QHash<QString, MasterMonitorUi> masterMonitor_;
+    // The daemon is holding every input's monitor silent for speakers; see
+    // MixerClient::monitorCancelledBySpeakers().
+    bool monitorCutForSpeakers_ = false;
     // What refreshCardLooks() last pushed, as a flat signature, so the common
     // case -- nothing customised, or nothing changed -- costs one comparison
     // rather than a repaint of every card four times a second.
@@ -258,42 +279,57 @@ private:
     // in it goes to the end, in the order the daemon gave, so a newly created
     // channel appears where it always did.
     QList<ChannelInfo> orderedChannels() const;
-    // Live drag handling on stripHost_; see the drag handle on ChannelStrip.
-    bool handleStripDrag(QEvent *event);
-    // The channel strip the cursor is over, or the gap it is nearest.
-    int channelDropIndex(const QPoint &hostPos) const;
+    // Moves cards along the row inside the window: input devices among
+    // themselves, channels among themselves, Monitor mixes among themselves.
+    CardShuffle *shuffle_ = nullptr;
+    // Hands a card's press-and-travel to shuffle_, with the cards of its own
+    // kind as the ones it may pass.
+    void wireStripReorder(ChannelStrip *strip, bool master);
+
+    // ------------------------------------------------ input device order
+    // Left to right, by bus id; a window preference like the channels'. The
+    // numbers and default colours stay with the device -- they come from the
+    // daemon's order (masterStripOrder_) -- so moving a card moves its number
+    // with it.
+    QStringList masterDisplayOrder_;
+    QStringList displayedMasterOrder(const QStringList &daemonOrder) const;
+    void saveMasterOrderFromRow();
 
     // -------------------------------------------------------------- outputs
+    // -------------------------------------------------------------- outputs
     struct MonitorOutputRowUi {
-        QLabel *icon = nullptr;
-        QLabel *label = nullptr;
-        QComboBox *combo = nullptr;
-        QPushButton *addBtn = nullptr;
-        QPushButton *removeBtn = nullptr;
-        IconToggle *mute = nullptr;
-        QSlider *volume = nullptr;
-        LevelMeter *meter = nullptr;
+        MixCard *card = nullptr;
     };
-    void applyMonitorOutputRowConnected(MonitorOutputRowUi &row, bool connected);
-    // Greys the "+" once every output device already drives a Monitor mix.
-    void applyAddMonitorOutputEnabled(MonitorOutputRowUi &row,
-                                      const QList<MonitorOutputInfo> &states,
-                                      const QList<OutputInfo> &outs);
-    QGridLayout *outputsGrid_ = nullptr;
-    CardBase *outputsCard_ = nullptr;
+    // Greys the "+" once every output device already drives a Monitor mix,
+    // or once there are five.
+    void syncAddMonitorButton(const QList<MonitorOutputInfo> &states,
+                              const QList<OutputInfo> &outs);
+    // Application Settings, the Mixes caption and the mix cards: one widget in
+    // the row of cards, after the channels.
+    QWidget *outputsBlock_ = nullptr;
+    // The mixes' block: the Monitor mixes (monitorHost_, laid out by
+    // monitorCardsRow_) and the Stream mix, which goes either side of them.
+    QHBoxLayout *outputsRow_ = nullptr;
+    QWidget *monitorHost_ = nullptr;
+    QHBoxLayout *monitorCardsRow_ = nullptr;
+    QPushButton *addMonitorBtn_ = nullptr;
+    MixCard *streamCard_ = nullptr;
     QList<MonitorOutputRowUi> monitorOutputRows_;
-    QLabel *streamIcon_ = nullptr;
-    QLabel *streamNameLabel_ = nullptr;
+    // Moving a Monitor mix card along the row, by its badge or its body,
+    // only moves it on screen, the way the input devices do: the mix keeps
+    // its number and colour, and the daemon's order is untouched. The order
+    // is remembered by device and applied whenever the cards are built. A
+    // click on a badge opens its device menu. See handleMonitorOutputDrag().
+    bool handleMonitorOutputDrag(QObject *watched, QEvent *event);
+    void commitMonitorOrderFromRow();
+    QList<int> displayedMonitorOrder(const QList<MonitorOutputInfo> &states, int count) const;
+    // The "+" goes on the last card in the row.
+    void seatMonitorAddButton();
+    int monitorDragFrom_ = -1;
+    bool monitorDragging_ = false;
+    QPoint monitorDragStart_;
     QString monitorOutputsSig_;
-    // The Stream mix's fixed name, retitled when the device profile lands.
-    class BoxedName *streamMixName_ = nullptr;
-    IconToggle *streamMute_ = nullptr;
-    QSlider *streamVolume_ = nullptr;
-    LevelMeter *streamMeter_ = nullptr;
 
-    // -------------------------------------------------------------- sidebar
-    QWidget *sidebar_ = nullptr;
-    QScrollArea *sidebarScroll_ = nullptr;
     QHash<QString, GlobalEffectsWindow *> globalEffects_;
     QHash<QString, VirtualRackWindow *> virtualRacks_;
     AboutWindow *aboutWindow_ = nullptr;

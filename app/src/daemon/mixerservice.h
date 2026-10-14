@@ -308,6 +308,15 @@ public slots:
     void SetAutoPauseNoiseSuppression(bool on);
     bool NoiseSuppressionPaused() const;
 
+    // Cut every input device's monitor while a Monitor mix playing on
+    // speakers is audible, so a microphone is never heard through speakers
+    // that can hear it. Machine policy, on by default. The ear toggles keep
+    // the user's choice; MonitorCancelledBySpeakers() is whether the cut is
+    // in effect right now.
+    bool CancelMonitorOnSpeakers() const;
+    void SetCancelMonitorOnSpeakers(bool on);
+    bool MonitorCancelledBySpeakers() const;
+
     // Human-readable lines for the diagnostics view: "key\tvalue\tdetail".
     //
     // This exists because the entire latency investigation behind it was a
@@ -730,6 +739,9 @@ public slots:
     QString MonitorOutput() const;
     void SetMonitorOutput(const QString &sinkName);
     void SetMonitorOutputAt(int index, const QString &sinkName);
+    // Puts output `a`'s device at `b` and `b`'s at `a`, each with its own level
+    // and mute: dragging Monitor mix #3 onto #1 in the mixer.
+    void SwapMonitorOutputs(int a, int b);
     void AddMonitorOutput(const QString &sinkName);
     void RemoveMonitorOutput(int index);
     void SetMonitorOutputVolumeAt(int index, double volume);
@@ -1150,6 +1162,11 @@ private:
     const SoundboardSoundState *findSoundboardSound(const QString &id) const;
     QTimer soundboardReapTimer_;
     std::unique_ptr<waveline::LevelProbe> meters_;
+    // Per-application meters: a tap on each application's playback stream, by
+    // stream node id, and the Apps() row (its lowest node id) it reports
+    // under. Kept in step with the streams by syncAppMeters().
+    std::map<uint32_t, uint32_t> appMeterStreams_;
+    void syncAppMeters();
     // Created on the first TunerStart and torn down on TunerStop, so a daemon
     // nobody is tuning against holds no capture stream open.
     std::unique_ptr<waveline::Tuner> tuner_;
@@ -1186,6 +1203,11 @@ private:
     void setMicNoisePaused(bool paused);
     // Whether anything downstream can hear a processed microphone.
     bool processedMicHasListener() const;
+    // Whether an audible Monitor mix plays on speakers, and the cut that
+    // follows from it. Run on every Changed.
+    bool speakersAudible() const;
+    void updateSpeakerGuard();
+    bool speakerGuard_ = false;
     // Whether this one recording stream, someone else's, could be hearing
     // Waveline's processed microphone. A tap on an application's own playback
     // -- a music player's visualiser -- cannot, however it looks otherwise.

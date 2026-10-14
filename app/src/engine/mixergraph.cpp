@@ -504,7 +504,7 @@ bool MixerGraph::startChannelChain(const std::string &id, const std::string &lab
     std::string outNcErr;
     chain.outputNc = std::make_unique<NoiseFilter>();
     if (chain.outputNc->start(ncNodeName(id, FxStage::Output),
-                              disp(label + " Output NC"), outNcErr,
+                              disp(label + " Output Noise Suppression"), outNcErr,
                               false, engine_, 2)) {
         chain.outputNcReady = true;
         chain.outputNc->setEnabled(false);
@@ -2149,7 +2149,7 @@ bool MixerGraph::ensureChannelNoiseFilter(const std::string &channelId, FxStage 
     if (stage == FxStage::Input) {
         chain.inputNc = std::make_unique<NoiseFilter>();
         if (!chain.inputNc->start(ncNodeName(channelId, FxStage::Input),
-                                  disp(c->name + " Input NC"), err,
+                                  disp(c->name + " Input Noise Suppression"), err,
                                   false, engine_, 2)) {
             chain.inputNc.reset();
             return false;
@@ -2161,7 +2161,7 @@ bool MixerGraph::ensureChannelNoiseFilter(const std::string &channelId, FxStage 
     }
     chain.outputNc = std::make_unique<NoiseFilter>();
     if (!chain.outputNc->start(ncNodeName(channelId, FxStage::Output),
-                               disp(c->name + " Output NC"), err,
+                               disp(c->name + " Output Noise Suppression"), err,
                                false, engine_, 2)) {
         chain.outputNc.reset();
         return false;
@@ -2292,7 +2292,7 @@ bool MixerGraph::ensureChannelMicSource(const std::string &channelId) {
         std::string err;
         chain.inputNc = std::make_unique<NoiseFilter>();
         if (chain.inputNc->start(ncNodeName(channelId, FxStage::Input),
-                                 disp(c->name + " Mic NC"), err,
+                                 disp(c->name + " Mic Noise Suppression"), err,
                                  false, engine_, 2)) {
             chain.inputNcReady = true;
             chain.inputNc->setEnabled(false);
@@ -2679,7 +2679,7 @@ bool MixerGraph::ensureChannelFilters(std::string &error) {
             chain.outputNc = std::make_unique<NoiseFilter>();
             std::string ncErr;
             if (chain.outputNc->start(ncNodeName(c.id, FxStage::Output),
-                                      disp(c.name + " Output NC"), ncErr,
+                                      disp(c.name + " Output Noise Suppression"), ncErr,
                                       false, engine_, 2)) {
                 chain.outputNcReady = true;
                 chain.outputNc->setEnabled(false);
@@ -3262,6 +3262,15 @@ bool MixerGraph::setMonitorOutputAt(size_t index, const std::string &sinkName,
     return createMonitorOutputPath(index, error);
 }
 
+bool MixerGraph::swapMonitorOutputs(size_t a, size_t b) {
+    if (a == b || a >= monitorOutputs_.size() || b >= monitorOutputs_.size())
+        return false;
+    // Safe because an entry's loopback is named for its slot, which travels
+    // with it, never for where it sits in the list -- see MonitorOutputEntry.
+    std::swap(monitorOutputs_[a], monitorOutputs_[b]);
+    return true;
+}
+
 // Adding an output touches nothing but the output being added.
 //
 // This used to go through rebuildMonitorOutputs(), and that is how every other
@@ -3365,6 +3374,27 @@ bool MixerGraph::setMonitorMasterVolume(float volume) {
     monitorMasterMuted_ = false;
     applyAllMonitorOutputGains();
     return true;
+}
+
+bool MixerGraph::setInputMonitorCut(bool cut) {
+    bool changed = false;
+    if (!cut) {
+        for (const std::string &handle : cutMonitorPaths_)
+            changed = eng_.setPathCut(handle, false) || changed;
+        cutMonitorPaths_.clear();
+        return changed;
+    }
+    for (const MasterBusRuntime &bus : masterBuses_) {
+        const std::string handle =
+            isPrimaryMaster(bus.id) ? pathName("mic", Mix::Monitor) : masterMonitorPath(bus.id);
+        cutMonitorPaths_.insert(handle);
+        changed = eng_.setPathCut(handle, true) || changed;
+    }
+    // The microphone's own, even before its bus is listed.
+    const std::string mic = pathName("mic", Mix::Monitor);
+    cutMonitorPaths_.insert(mic);
+    changed = eng_.setPathCut(mic, true) || changed;
+    return changed;
 }
 
 bool MixerGraph::setMonitorMasterMuted(bool muted) {

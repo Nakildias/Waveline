@@ -27,6 +27,9 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWindow>
 
@@ -38,10 +41,73 @@
 #include "rackpresetstore.h"
 #include "monarchy/chrome.h"
 #include "monarchy/desktop.h"
+#include "monarchy/smooth_scroller.h"
 #include "theme.h"
 #include "widgets.h"
 
 namespace {
+
+// The rack's modules, as tall as they are up to five of them and scrolled past
+// that. The window is sized by its layout (SetFixedSize), so the cap has to be
+// this widget's own size hint: a QScrollArea's default hint knows nothing
+// about how many modules there are.
+class RackScroll : public QScrollArea {
+public:
+    static constexpr int kVisibleModules = 5;
+
+    explicit RackScroll(QWidget *parent) : QScrollArea(parent) {
+        setWidgetResizable(true);
+        setFrameShape(QFrame::NoFrame);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        viewport()->setAutoFillBackground(false);
+    }
+
+    // The modules' own layout, whose height is what is measured.
+    void watch(QWidget *content, QVBoxLayout *modules) {
+        setWidget(content);
+        content->setAutoFillBackground(false);
+        content->installEventFilter(this);
+        modules_ = modules;
+    }
+
+    QSize sizeHint() const override {
+        if (!widget()) return QScrollArea::sizeHint();
+        const QSize content = widget()->sizeHint();
+        const int height = cappedHeight(content.height());
+        const bool scrolls = height < content.height();
+        const int bar = scrolls ? verticalScrollBar()->sizeHint().width() : 0;
+        return {content.width() + bar, height};
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        // A module came or went: the content's hint moved, and the window
+        // sizes itself from this widget's.
+        if (watched == widget() && event->type() == QEvent::LayoutRequest)
+            updateGeometry();
+        return QScrollArea::eventFilter(watched, event);
+    }
+
+private:
+    int cappedHeight(int full) const {
+        if (!modules_) return full;
+        const QMargins m = modules_->contentsMargins();
+        int height = m.top() + m.bottom();
+        int counted = 0;
+        for (int i = 0; i < modules_->count(); ++i) {
+            QWidget *w = modules_->itemAt(i) ? modules_->itemAt(i)->widget() : nullptr;
+            if (!w || w->isHidden()) continue;
+            if (counted == kVisibleModules) return height;
+            if (counted > 0) height += modules_->spacing();
+            height += w->sizeHint().height();
+            ++counted;
+        }
+        return full;
+    }
+
+    QVBoxLayout *modules_ = nullptr;
+};
 int scaled(double v, double factor) { return int(std::lround(v * factor)); }
 
 constexpr const char *kPresetSuffix = ".wlrackpreset";
@@ -905,9 +971,9 @@ RackModule *createModuleFor(int stageIndex, QWidget *parent) {
 // ----------------------------------------------------------- VirtualRackWindow
 
 VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterId,
-                                     const QString &title, QWidget *parent)
+                                     const QString &title, QWidget *parent, bool channel)
     : QWidget(parent, Qt::Window | Qt::FramelessWindowHint), client_(client),
-      masterId_(masterId) {
+      masterId_(masterId), channel_(channel) {
     setWindowTitle(tr("Creative FX Rack / %1").arg(title));
 
     auto *outer = new QVBoxLayout(this);
@@ -990,7 +1056,9 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
     // that is meant to read as a plain "+".
     addMenu_ = new QMenu(addBtn_);
     connect(addBtn_, &QAbstractButton::clicked, this, [this] {
-        addMenu_->exec(addBtn_->mapToGlobal(QPoint(0, addBtn_->height())));
+        // Centred under the button rather than hanging off its left edge.
+        const int x = (addBtn_->width() - addMenu_->sizeHint().width()) / 2;
+        addMenu_->exec(addBtn_->mapToGlobal(QPoint(x, addBtn_->height())));
     });
     if (chrome) {
         titleLay->addWidget(Monarchy::pillGroup(titleBar, {presetsBtn_, addBtn_}, Theme::Bg));
@@ -1001,19 +1069,22 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
 
     outer->addWidget(titleBar);
 
-    auto *content = new QWidget(this);
+    auto *scroll = new RackScroll(this);
+    auto *content = new QWidget(scroll);
     auto *contentLay = new QVBoxLayout(content);
     contentLay->setContentsMargins(12, 12, 12, 12);
     contentLay->setSpacing(10);
 
-    // Modules go straight into the content layout now, no QScrollArea: the
-    // window itself grows and shrinks to fit them (see the SetFixedSize
-    // constraint below), so there is never overflow left for a scrollbar to
-    // handle.
+    // The window grows and shrinks to fit the modules (see the SetFixedSize
+    // constraint below) up to five of them; past that it stops growing and
+    // the modules scroll, so a full rack does not run off the screen.
     modulesContainer_ = content;
     modulesLay_ = contentLay;
+    scroll->watch(content, contentLay);
+    modulesScroll_ = scroll;
+    if (Monarchy::isActive()) Monarchy::SmoothScroller::attach(scroll, 48);
 
-    outer->addWidget(content);
+    outer->addWidget(scroll);
 
     // Ties the whole window's size to modulesLay_'s actual content instead
     // of a size the user (or a resize event) could leave mismatched with
@@ -1029,17 +1100,33 @@ VirtualRackWindow::VirtualRackWindow(MixerClient *client, const QString &masterI
     rebuildPresetsMenu();
 }
 
+CreativeFxInfo VirtualRackWindow::readFx() const {
+    return channel_ ? client_->channelCreativeFx(masterId_, QStringLiteral("output"))
+                    : client_->masterRackCreativeFx(masterId_);
+}
+
+void VirtualRackWindow::writeFx(const CreativeFxInfo &info) {
+    if (channel_)
+        client_->setChannelCreativeFx(masterId_, QStringLiteral("output"), info);
+    else
+        client_->setMasterRackCreativeFx(masterId_, info);
+}
+
 void VirtualRackWindow::showEvent(QShowEvent *e) {
     QWidget::showEvent(e);
     // Opening the Rack is what "drive this device from the Rack" means now
     // -- no separate switch to leave on by accident after the window closes.
-    if (client_->available()) client_->setMasterRackMode(masterId_, true);
+    // A channel's rack has no mode: its effects are the channel's own.
+    if (client_->available() && !channel_) client_->setMasterRackMode(masterId_, true);
     refresh();
+    // And once more when the window has finished opening: a module's own
+    // height can settle on its first polish, after the fit above.
+    QTimer::singleShot(0, this, [this] { fitToModules(); });
 }
 
 void VirtualRackWindow::hideEvent(QHideEvent *e) {
     QWidget::hideEvent(e);
-    if (client_->available()) client_->setMasterRackMode(masterId_, false);
+    if (client_->available() && !channel_) client_->setMasterRackMode(masterId_, false);
 }
 
 int VirtualRackWindow::visualIndexFor(int stageIndex) const {
@@ -1065,14 +1152,26 @@ RackModule *VirtualRackWindow::addModuleWidget(int stageIndex) {
     connect(mod, &RackModule::removeRequested, this, &VirtualRackWindow::onRemoveRequested);
     mod->grip()->installEventFilter(this);
     modulesLay_->insertWidget(visualIndexFor(stageIndex), mod);
+    // Shown now. Left to the layout, a module added to an open window is only
+    // shown on the next pass of the event loop, and until then the layout
+    // counts it as empty -- so a window fitted in between came out sized for
+    // fewer modules than it has, and stayed that way until something else
+    // re-laid it.
+    mod->show();
     modules_.insert(stageIndex, mod);
     return mod;
+}
+
+void VirtualRackWindow::fitToModules() {
+    modulesLay_->activate();
+    modulesScroll_->updateGeometry();
+    layout()->activate();
 }
 
 void VirtualRackWindow::refresh() {
     if (!client_->available() || !isVisible()) return;
     updating_ = true;
-    current_ = client_->masterRackCreativeFx(masterId_);
+    current_ = readFx();
     if (current_.presentCount >= 0) {
         // The front presentCount entries of order are exactly which stages
         // this rack had a module for, in sequence -- restores a module even
@@ -1095,11 +1194,13 @@ void VirtualRackWindow::refresh() {
     for (RackModule *m : std::as_const(modules_)) m->loadFrom(current_);
     rebuildAddMenu();
     updating_ = false;
+    fitToModules();
 }
 
 void VirtualRackWindow::onAddRequested(int stageIndex) {
     if (modules_.contains(stageIndex)) return;
     addModuleWidget(stageIndex);
+    fitToModules();
     rebuildAddMenu();
     syncFromModulesAndPush();
 }
@@ -1120,6 +1221,7 @@ void VirtualRackWindow::onRemoveRequested(int stageIndex) {
     // gap-then-snap is the flicker. Forcing both layouts to activate here,
     // synchronously, collapses it into the single final frame instead.
     modulesLay_->activate();
+    modulesScroll_->updateGeometry();
     layout()->activate();
     rebuildAddMenu();
     syncFromModulesAndPush();
@@ -1139,6 +1241,7 @@ void VirtualRackWindow::clearAllModules() {
     }
     modules_.clear();
     modulesLay_->activate();
+    modulesScroll_->updateGeometry();
     layout()->activate();
 }
 
@@ -1164,7 +1267,7 @@ void VirtualRackWindow::syncFromModulesAndPush() {
     }
     current_.order = order;
     updating_ = true;
-    client_->setMasterRackCreativeFx(masterId_, current_);
+    writeFx(current_);
     updating_ = false;
 }
 
@@ -1279,7 +1382,7 @@ void VirtualRackWindow::onLoadPreset(const QString &name) {
     // finds present, it never removes ones the new state dropped.
     clearAllModules();
     presentSignature_ = -1;
-    client_->setMasterRackCreativeFx(masterId_, decodeCreativeFxSpec(spec));
+    writeFx(decodeCreativeFxSpec(spec));
     // Reads are ordered behind our own writes on this connection (see
     // MixerClient's own comment on this), so refresh() here is guaranteed to
     // read back the state just pushed above, not a stale poll.

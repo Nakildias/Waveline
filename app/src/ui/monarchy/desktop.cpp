@@ -349,8 +349,15 @@ void Settings::read() {
     c.endGroup();
 
     const QJsonObject appearance = readAppearance();
-    opacityPercent_ = std::clamp(appearance.value(QStringLiteral("windowOpacity")).toInt(85), 0, 100);
+    // Monarchy's effectiveWindowOpacity(): the stored choice, or solid while
+    // Blur & Transparency is off -- which is what Gaming Mode turns off.
+    blurEnabled_ = appearance.value(QStringLiteral("blurEnabled")).toBool(true);
+    opacityPercent_ = blurEnabled_
+                          ? std::clamp(appearance.value(QStringLiteral("windowOpacity")).toInt(85), 0, 100)
+                          : 100;
     menuSurface_ = readMenuSurface(appearance);
+    // The shell's menus go solid with it (ShellComponentStyles' `opaque`).
+    if (!blurEnabled_) menuSurface_.fill.setAlpha(255);
 
     QSettings kwin(kwinrcPath(), QSettings::IniFormat);
     kwinCornerRadius_ = std::max(0, kwin.value(QStringLiteral("Round-Corners/Size"), 14).toInt());
@@ -371,7 +378,8 @@ void Settings::read() {
                        .arg(menuSurface_.fadeBottom).arg(menuSurface_.borderWidth)
                        .arg(menuSurface_.borderTop).arg(menuSurface_.borderBottom)
                        .arg(menuSurface_.borderColour.name(QColor::HexArgb))
-                       .arg(kwinCornerRadius_);
+                       .arg(kwinCornerRadius_)
+                 + (blurEnabled_ ? QString() : QStringLiteral("/opaque"));
 }
 
 }  // namespace Monarchy

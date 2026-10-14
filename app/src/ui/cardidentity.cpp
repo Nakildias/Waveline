@@ -5,7 +5,6 @@
 
 #include <QApplication>
 #include <QColorDialog>
-#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -19,11 +18,13 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "monarchy/chrome.h"
 #include "theme.h"
+#include "widgets.h"
 
 namespace {
 
-constexpr int kPreviewPx = 44;
+constexpr int kPreviewPx = 64;
 constexpr int kIconButtonPx = 38;
 constexpr int kIconColumns = 8;
 
@@ -94,12 +95,6 @@ QPixmap tilePreview(const QColor &fill, const QString &icon, int px) {
     return pm;
 }
 
-QLabel *caption(const QString &text, QWidget *parent) {
-    auto *l = new QLabel(text, parent);
-    Theme::setTextColor(l, Theme::TextDim);
-    return l;
-}
-
 }  // namespace
 
 CardIdentityDialog::CardIdentityDialog(const QString &title, const QString &name,
@@ -114,61 +109,71 @@ CardIdentityDialog::CardIdentityDialog(const QString &title, const QString &name
       defaultIcon_(defaultIcon),
       usingDefaults_(!color.isValid() && icon.isEmpty()) {
     setWindowTitle(title);
-    setMinimumWidth(430);
+    setMinimumWidth(440);
 
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(16, 16, 16, 16);
     lay->setSpacing(12);
+    // On Monarchy the header is the titlebar: the window's name and its
+    // buttons, the way every other window there looks. Elsewhere the system's
+    // own titlebar stays.
+    Monarchy::WindowChrome::adopt(this, lay);
 
-    // ------------------------------------------------------ name + preview
-    auto *top = new QHBoxLayout;
-    top->setSpacing(12);
+    // ------------------------------------------------------ preview + name
+    // The card as it will look, centred over everything that changes it.
     preview_ = new QLabel(this);
     preview_->setFixedSize(kPreviewPx, kPreviewPx);
-    top->addWidget(preview_);
+    lay->addWidget(preview_, 0, Qt::AlignHCenter);
 
-    auto *nameCol = new QVBoxLayout;
-    nameCol->setSpacing(4);
-    nameCol->addWidget(caption(tr("Name"), this));
     name_ = new QLineEdit(name, this);
     name_->setPlaceholderText(tr("Card name"));
-    nameCol->addWidget(name_);
-    top->addLayout(nameCol, 1);
-    lay->addLayout(top);
+    name_->setAlignment(Qt::AlignCenter);
+    name_->setFixedWidth(280);
+    lay->addWidget(name_, 0, Qt::AlignHCenter);
+    lay->addSpacing(4);
 
     // ------------------------------------------------------------- colour
-    lay->addWidget(caption(tr("Colour"), this));
+    auto *colourCard = new Section(tr("Colour"), this);
     auto *swatches = new QGridLayout;
     swatches->setSpacing(6);
     buildColorRow(swatches, 0);
-    lay->addLayout(swatches);
+    colourCard->contentLayout()->addLayout(swatches);
+    lay->addWidget(colourCard);
 
     // --------------------------------------------------------------- icon
-    auto *iconHead = new QHBoxLayout;
-    iconHead->addWidget(caption(tr("Icon"), this), 1);
-    auto *addSvg = new QPushButton(tr("Add SVG…"), this);
+    auto *iconCard = new Section(tr("Icon"), this);
+    auto *addSvg = new QPushButton(tr("Add SVG\u2026"), iconCard);
+    addSvg->setCursor(Qt::PointingHandCursor);
     addSvg->setToolTip(
         tr("Copies an SVG into %1 and offers it here from now on.\n"
            "Icons drawn with currentColor take the card's colour; one with "
            "colours of its own keeps them.")
             .arg(Theme::userIconDir()));
     connect(addSvg, &QPushButton::clicked, this, &CardIdentityDialog::importIcon);
-    iconHead->addWidget(addSvg);
-    lay->addLayout(iconHead);
-
     buildIconGrid();
-    lay->addWidget(iconScroll_, 1);
+    iconCard->contentLayout()->addWidget(iconScroll_, 1);
+    iconCard->contentLayout()->addWidget(addSvg, 0, Qt::AlignRight);
+    lay->addWidget(iconCard, 1);
+    iconSection_ = {iconCard};
 
     // ------------------------------------------------------------ buttons
-    auto *buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    auto *reset = buttons->addButton(tr("Use default"), QDialogButtonBox::ResetRole);
+    auto *buttons = new QHBoxLayout;
+    buttons->setSpacing(8);
+    auto *reset = new QPushButton(tr("Use default"), this);
     reset->setToolTip(tr("Hand the colour and the icon back to the theme. The "
                          "name is left as it is."));
     connect(reset, &QPushButton::clicked, this, &CardIdentityDialog::useDefaults);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    lay->addWidget(buttons);
+    buttons->addWidget(reset);
+    buttons->addStretch(1);
+    auto *cancel = new QPushButton(tr("Cancel"), this);
+    connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
+    buttons->addWidget(cancel);
+    auto *save = new QPushButton(tr("Save"), this);
+    save->setDefault(true);
+    connect(save, &QPushButton::clicked, this, &QDialog::accept);
+    buttons->addWidget(save);
+    for (QPushButton *b : {reset, cancel, save}) b->setCursor(Qt::PointingHandCursor);
+    lay->addLayout(buttons);
 
     updatePreview();
     Theme::onChange(this, [this] { updatePreview(); });
@@ -177,6 +182,16 @@ CardIdentityDialog::CardIdentityDialog(const QString &title, const QString &name
 }
 
 QString CardIdentityDialog::name() const { return name_->text().trimmed(); }
+
+void CardIdentityDialog::setNameEditable(bool editable) {
+    name_->setVisible(editable);
+    adjustSize();
+}
+
+void CardIdentityDialog::setIconEditable(bool editable) {
+    for (QWidget *w : std::as_const(iconSection_)) w->setVisible(editable);
+    adjustSize();
+}
 
 void CardIdentityDialog::buildColorRow(QGridLayout *grid, int row) {
     const int count = int(sizeof(kSwatches) / sizeof(kSwatches[0]));
@@ -189,20 +204,27 @@ void CardIdentityDialog::buildColorRow(QGridLayout *grid, int row) {
         b->setToolTip(c.name(QColor::HexRgb));
         b->setIconSize(QSize(22, 22));
         b->setAutoRaise(true);
+        b->setCheckable(true);
         b->setProperty("swatch", c);
         swatches_ << b;
         connect(b, &QToolButton::clicked, this, [this, c] { setColor(c); });
         grid->addWidget(b, row + col / kIconColumns, col % kIconColumns);
         ++col;
     }
-    auto *custom = new QPushButton(tr("Custom…"), this);
-    custom->setToolTip(tr("Any colour, from the system colour picker."));
-    connect(custom, &QPushButton::clicked, this,
-            &CardIdentityDialog::pickCustomColor);
-    // Its own row under the swatches: sharing the last one leaves it as wide
-    // as whatever is left over, which is a different width for every count.
-    grid->addWidget(custom, row + (col + kIconColumns - 1) / kIconColumns, 0, 1,
-                    kIconColumns);
+    // The last cell of the grid rather than a row of its own: with the
+    // swatches it fills the grid exactly.
+    auto *custom = new QToolButton(this);
+    custom->setFixedSize(26, 26);
+    custom->setCursor(Qt::PointingHandCursor);
+    custom->setAutoRaise(true);
+    custom->setIcon(Theme::icon(QStringLiteral("plus"), Theme::Text, 16));
+    custom->setIconSize(QSize(16, 16));
+    custom->setToolTip(tr("Custom colour, from the system colour picker."));
+    connect(custom, &QToolButton::clicked, this, &CardIdentityDialog::pickCustomColor);
+    grid->addWidget(custom, row + col / kIconColumns, col % kIconColumns);
+    // Centred in the card rather than packed to its left edge.
+    grid->setColumnStretch(0, 0);
+    grid->setAlignment(Qt::AlignHCenter);
 }
 
 void CardIdentityDialog::buildIconGrid() {
@@ -284,6 +306,7 @@ void CardIdentityDialog::updatePreview() {
     for (QToolButton *b : swatches_) {
         const QColor c = b->property("swatch").value<QColor>();
         b->setIcon(QIcon(tilePreview(c, icon_, 22)));
+        b->setChecked(c == color_);
     }
     preview_->setToolTip(usingDefaults_
                              ? tr("Following the theme.")

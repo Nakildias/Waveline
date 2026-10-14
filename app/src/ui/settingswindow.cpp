@@ -14,6 +14,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
@@ -76,7 +77,7 @@ const ServiceRow kServices[] = {
 
 SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     : QWidget(parent, Qt::Window), client_(client) {
-    setWindowTitle(tr("Latency & Diagnostics"));
+    setWindowTitle(tr("Settings & Diagnostics"));
     resize(975, 775);
     setMinimumSize(620, 500);
 
@@ -84,7 +85,7 @@ SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     outer->setContentsMargins(16, 16, 16, 16);
     outer->setSpacing(12);
 
-    auto *title = new QLabel(tr("Latency & Diagnostics"), this);
+    auto *title = new QLabel(tr("Settings & Diagnostics"), this);
     QFont tf = title->font();
     tf.setBold(true);
     tf.setPointSizeF(tf.pointSizeF() * 1.2);
@@ -95,6 +96,7 @@ SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     if (Monarchy::WindowChrome::adopt(this, outer)) title->hide();
 
     auto *tabs = new QTabWidget(this);
+    tabs->addTab(buildGeneralTab(), tr("General"));
     tabs->addTab(buildLatencyTab(), tr("Latency"));
     tabs->addTab(buildDesktopTab(), tr("Desktop"));
     tabs->addTab(buildWarningsTab(), tr("Warnings"));
@@ -131,6 +133,133 @@ SettingsWindow::SettingsWindow(MixerClient *client, QWidget *parent)
     poll_ = new QTimer(this);
     poll_->setInterval(2000);
     connect(poll_, &QTimer::timeout, this, &SettingsWindow::refresh);
+}
+
+// ------------------------------------------------------------- General tab
+
+QWidget *SettingsWindow::buildGeneralTab() {
+    auto *page = new QWidget(this);
+    auto *lay = new QVBoxLayout(page);
+    lay->setContentsMargins(12, 12, 12, 12);
+    lay->setSpacing(12);
+
+    auto *nc = new Section(tr("Noise suppression"), page);
+    auto *ncLay = nc->contentLayout();
+
+    // Which model removes background noise. It used to be a row in
+    // Application Settings, which is about applications; this applies to the
+    // microphone and every channel at once.
+    auto *engineRow = new QHBoxLayout;
+    auto *engineName = new QLabel(tr("Engine"), page);
+    engineRow->addWidget(engineName);
+    noiseEngine_ = new QComboBox(page);
+    noiseEngine_->setCursor(Qt::PointingHandCursor);
+    engineRow->addWidget(noiseEngine_, 1);
+    ncLay->addLayout(engineRow);
+    const QString engineTip =
+        tr("Which model removes background noise, for the microphone and every "
+           "channel.");
+    engineName->setToolTip(engineTip);
+    noiseEngine_->setToolTip(engineTip);
+    ncLay->addWidget(dimLabel(
+        tr("DeepFilterNet is far better on steady noise such as fans, keyboards "
+           "and traffic, but costs several times the CPU. RNNoise is small and "
+           "fast, and is always available."),
+        page));
+    connect(noiseEngine_, &QComboBox::activated, this,
+            &SettingsWindow::onNoiseEnginePicked);
+    refreshNoiseEngines();
+    connect(client_, &MixerClient::changed, this, &SettingsWindow::refreshNoiseEngines);
+
+    ncLay->addSpacing(6);
+    ncAutoPauseCheck_ = new QCheckBox(
+        tr("Pause noise suppression while nothing is listening"), page);
+    // Checked first for the same reason as the real-time box: it is the
+    // setting's default, and an absent daemon should not read as "off".
+    ncAutoPauseCheck_->setChecked(true);
+    connect(ncAutoPauseCheck_, &QCheckBox::toggled, this,
+            &SettingsWindow::onNcAutoPauseToggled);
+    ncLay->addWidget(ncAutoPauseCheck_);
+    ncLay->addWidget(dimLabel(
+        tr("Saves CPU when no application is recording a Waveline microphone "
+           "or the Stream mix, you are not monitoring a processed microphone, "
+           "and no ducking is keyed from one. It resumes the moment an "
+           "application starts recording. Your noise suppression switches are "
+           "not changed."),
+        page));
+    ncAutoPauseStatus_ = dimLabel(QString(), page);
+    ncLay->addWidget(ncAutoPauseStatus_);
+    lay->addWidget(nc);
+    // The pause comes and goes with applications, not with this window.
+    connect(client_, &MixerClient::changed, this, &SettingsWindow::syncNcAutoPause);
+
+    auto *mon = new Section(tr("Monitoring"), page);
+    auto *monLay = mon->contentLayout();
+    speakerCutCheck_ =
+        new QCheckBox(tr("Cancel Monitor When Speakers are Active"), page);
+    // Checked first: it is the default, and an absent daemon should not read
+    // as "off".
+    speakerCutCheck_->setChecked(true);
+    connect(speakerCutCheck_, &QCheckBox::toggled, this,
+            &SettingsWindow::onSpeakerCutToggled);
+    monLay->addWidget(speakerCutCheck_);
+    monLay->addWidget(dimLabel(
+        tr("A microphone heard through speakers it can hear is a feedback loop. "
+           "While a Monitor mix whose icon is a speaker is playing, no input "
+           "device is monitored, and their ears turn red to say so. Muting "
+           "that mix brings monitoring back. Your ear switches are not "
+           "changed."),
+        page));
+    speakerCutStatus_ = dimLabel(QString(), page);
+    monLay->addWidget(speakerCutStatus_);
+    lay->addWidget(mon);
+    connect(client_, &MixerClient::changed, this, &SettingsWindow::syncSpeakerCut);
+
+    lay->addStretch(1);
+    return page;
+}
+
+void SettingsWindow::refreshNoiseEngines() {
+    if (!noiseEngine_ || !client_->available()) return;
+
+    const QString current = client_->noiseEngine();
+    const auto engines = client_->noiseEngines();
+
+    QSignalBlocker block(noiseEngine_);
+    noiseEngine_->clear();
+    for (const auto &e : engines) {
+        // Unavailable engines are listed but greyed, not hidden.
+        // "DeepFilterNet is not installed" is far more useful to see than an
+        // absence the user has no way to explain.
+        noiseEngine_->addItem(e.available ? e.label
+                                          : tr("%1 (not installed)").arg(e.label),
+                              e.id);
+        const int i = noiseEngine_->count() - 1;
+        if (!e.available) {
+            auto *model = qobject_cast<QStandardItemModel *>(noiseEngine_->model());
+            if (model && model->item(i)) model->item(i)->setEnabled(false);
+            noiseEngine_->setItemData(i, e.reason, Qt::ToolTipRole);
+        }
+    }
+
+    const int idx = noiseEngine_->findData(current);
+    if (idx >= 0) noiseEngine_->setCurrentIndex(idx);
+}
+
+void SettingsWindow::onNoiseEnginePicked(int index) {
+    if (index < 0 || !noiseEngine_) return;
+    const QString id = noiseEngine_->itemData(index).toString();
+    if (id.isEmpty() || id == client_->noiseEngine()) return;
+
+    const QString error = client_->setNoiseEngine(id);
+    if (error.isEmpty()) return;
+
+    // The daemon kept the old engine running, so put the selector back rather
+    // than leaving it claiming something that is not true.
+    refreshNoiseEngines();
+    QMessageBox::warning(this, tr("Noise suppression"),
+                         tr("Could not switch to %1.\n\n%2")
+                             .arg(noiseEngine_->itemText(index), error));
 }
 
 // ------------------------------------------------------------- Latency tab
@@ -257,28 +386,6 @@ QWidget *SettingsWindow::buildLatencyTab() {
         page));
     lay->addWidget(rt);
 
-    auto *nc = new Section(tr("Noise suppression"), page);
-    auto *ncLay = nc->contentLayout();
-    ncAutoPauseCheck_ = new QCheckBox(
-        tr("Pause noise suppression while nothing is listening"), page);
-    // Checked first for the same reason as the real-time box: it is the
-    // setting's default, and an absent daemon should not read as "off".
-    ncAutoPauseCheck_->setChecked(true);
-    connect(ncAutoPauseCheck_, &QCheckBox::toggled, this,
-            &SettingsWindow::onNcAutoPauseToggled);
-    ncLay->addWidget(ncAutoPauseCheck_);
-    ncLay->addWidget(dimLabel(
-        tr("Saves CPU when no application is recording a Waveline microphone "
-           "or the Stream mix, you are not monitoring a processed microphone, "
-           "and no ducking is keyed from one. It resumes the moment an "
-           "application starts recording. Your noise suppression switches are "
-           "not changed."),
-        page));
-    ncAutoPauseStatus_ = dimLabel(QString(), page);
-    ncLay->addWidget(ncAutoPauseStatus_);
-    lay->addWidget(nc);
-    // The pause comes and goes with applications, not with this window.
-    connect(client_, &MixerClient::changed, this, &SettingsWindow::syncNcAutoPause);
 
     lay->addStretch(1);
     return page;
@@ -466,6 +573,22 @@ void SettingsWindow::syncNcAutoPause() {
     ncAutoPauseStatus_->setText(client_->noiseSuppressionPaused()
                                     ? tr("Paused now: nothing is listening.")
                                     : tr("Running now."));
+}
+
+void SettingsWindow::onSpeakerCutToggled(bool on) {
+    if (syncing_ || !speakerCutCheck_) return;
+    if (on == client_->cancelMonitorOnSpeakers()) return;
+    client_->setCancelMonitorOnSpeakers(on);
+}
+
+void SettingsWindow::syncSpeakerCut() {
+    if (!speakerCutCheck_ || !client_->available()) return;
+    syncing_ = true;
+    speakerCutCheck_->setChecked(client_->cancelMonitorOnSpeakers());
+    syncing_ = false;
+    speakerCutStatus_->setText(client_->monitorCancelledBySpeakers()
+                                   ? tr("Cancelled now: speakers are playing.")
+                                   : tr("Monitoring as set."));
 }
 
 void SettingsWindow::syncDspProfilingCheck() {
@@ -882,6 +1005,7 @@ void SettingsWindow::refresh() {
     syncRealtimeCheck();
     syncDspProfilingCheck();
     syncNcAutoPause();
+    syncSpeakerCut();
     refreshWarnings();
     refreshServices();
 }

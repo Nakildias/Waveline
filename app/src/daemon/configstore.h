@@ -415,6 +415,11 @@ struct AudioSettings {
     // The user's NC switches are untouched; this is a CPU saving only, so it
     // is machine policy rather than part of a profile. On by default.
     bool autoPauseNoiseSuppression = true;
+    // Cut every input device's monitor while a Monitor mix that plays on
+    // speakers is audible: a microphone heard through speakers it can hear
+    // is a feedback loop. Speakers are the mixes whose card wears a speaker
+    // icon. The ear toggles are left as they are. On by default.
+    bool cancelMonitorOnSpeakers = true;
 };
 
 // One Soundboard sound. Machine-wide (like CompanionSettings below) rather
