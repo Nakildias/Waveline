@@ -517,6 +517,12 @@ public:
     bool autoPauseNoiseSuppression() const;
     void setAutoPauseNoiseSuppression(bool on);
     bool noiseSuppressionPaused() const;
+    // Cut input monitoring while a Monitor mix plays on speakers (a mix whose
+    // card wears a speaker icon, unmuted). On by default.
+    // monitorCancelledBySpeakers() is whether the cut holds right now.
+    bool cancelMonitorOnSpeakers() const;
+    void setCancelMonitorOnSpeakers(bool on);
+    bool monitorCancelledBySpeakers() const;
 
     // How many input devices get a noise-suppression switch in a desktop
     // shell's microphone panel, and whether such a shell is running at all.
@@ -703,6 +709,7 @@ public slots:
     void setMicMonitorFx(bool on);
     void setMonitorOutput(const QString &sinkName);
     void setMonitorOutputAt(int index, const QString &sinkName);
+    void swapMonitorOutputs(int a, int b);
     void addMonitorOutput(const QString &sinkName);
     void removeMonitorOutput(int index);
     void setMonitorOutputVolumeAt(int index, double volume);

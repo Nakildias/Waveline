@@ -140,6 +140,8 @@ Environment variables (full install):
   WAVELINE_NO_AUTOSTART=1     Install without enabling/starting wavelined
   WAVELINE_PRO_AUDIO=1        Superseded: Pro Audio is the mixer's Latency setting
   WAVELINE_SKIP_DFN=1         Skip building DeepFilterNet
+  WAVELINE_FORCE_KERNEL=1     Rebuild the kernel patch even when the one DKMS
+                              has installed was built from the same sources
   WAVELINE_SKIP_FLUIDSYNTH=1  Do not install or stage FluidSynth (no MIDI
                               instruments; leaves app/lib/ untouched)
 
@@ -604,6 +606,12 @@ stage_fluidsynth() {
 		return 0
 	fi
 
+	# Already there and the same: copying it again would only give it a new
+	# mtime, and CMake relinks wavelined against anything newer than it.
+	if [[ $had -eq 1 ]] && cmp -s "$lib" "$FLUIDSYNTH_LIB"; then
+		ok "FluidSynth already staged from $lib"
+		return 0
+	fi
 	install -d -o "$RUSER" -g "$RUSER" "$ROOT/app/lib"
 	if install -m755 -o "$RUSER" -g "$RUSER" "$lib" "$FLUIDSYNTH_LIB"; then
 		[[ $had -eq 0 ]] && FLUIDSYNTH_CHANGED=1
@@ -1088,6 +1096,35 @@ kernel_patch_atomic() {
 	return 1
 }
 
+# Everything the kernel module is built from, as one hash: the kernel it is
+# for, the profiles it is patched for, and every file that stages or patches
+# it. Relative paths, so the same sources in another checkout hash the same.
+# devices/ is taken whole -- more than the module reads, so a profile change
+# that does not touch the patch still rebuilds it, which costs a few minutes,
+# where missing one that does would install a stale module.
+kernel_inputs_hash() {
+	{
+		printf '%s\n' "$KREL" "$DKMS_NAME" "$DKMS_VER" "$DETECTED"
+		(cd "$ROOT" && find dkms scripts/prepare-src.sh scripts/patches \
+		   scripts/lib/profiles.sh devices -type f -print0 2>/dev/null \
+		   | sort -z | xargs -0 -r sha256sum)
+	} | sha256sum | cut -d' ' -f1
+}
+
+# Written into the DKMS source tree once a build installs, so it goes with
+# that tree: removed by uninstall.sh's `dkms remove` and rm, replaced by the
+# next build. A run whose inputs hash the same, with DKMS reporting the module
+# installed for this kernel, has nothing to build -- the module on disk is
+# exactly what it would produce.
+KERNEL_STAMP="/usr/src/$DKMS_NAME-$DKMS_VER/.waveline-inputs"
+kernel_patch_current() {
+	[[ "${WAVELINE_FORCE_KERNEL:-0}" == "1" || $KERNEL_ONLY -eq 1 ]] && return 1
+	[[ -f "$KERNEL_STAMP" ]] || return 1
+	[[ "$(cat "$KERNEL_STAMP" 2>/dev/null)" == "$KERNEL_HASH" ]] || return 1
+	dkms status -m "$DKMS_NAME" -v "$DKMS_VER" -k "$KREL" 2>/dev/null \
+	  | grep -q ': installed'
+}
+
 say "1/9  Kernel patch (snd-usb-audio)"
 KB="$(kbuild)"
 if ! any_profile_has KERNEL_PATCH; then
@@ -1101,6 +1138,7 @@ elif ! command -v dkms >/dev/null || [[ -z "$KB" ]]; then
 	warn "skipped: needs dkms and kernel headers for $KREL"
 	FAILED_KERNEL=1
 else
+	KERNEL_HASH="$(kernel_inputs_hash)"
 	# Invoked through bash on purpose: if the execute bit is ever lost (a zip
 	# download, a copied tree, a permissive umask) executing it directly fails
 	# with EACCES and the kernel patch is silently skipped -- the one part of
@@ -1112,7 +1150,13 @@ else
 	#
 	# The tarball cache is DKMS's (see dkms/dkms-stage.sh), so the DKMS build
 	# below finds this download already there instead of fetching it again.
-	if WAVELINE_PROFILES="$DETECTED" WAVELINE_CACHE=/var/cache/waveline \
+	if kernel_patch_current; then
+		# The slow part of an update, and the most often pointless one: two full
+		# module builds (the trial build here and DKMS's own) for sources that
+		# have not changed since the last run.
+		ok "already installed for $KREL from these sources -- not rebuilding"
+		ok "  (WAVELINE_FORCE_KERNEL=1 rebuilds it anyway)"
+	elif WAVELINE_PROFILES="$DETECTED" WAVELINE_CACHE=/var/cache/waveline \
 	     bash "$ROOT/scripts/prepare-src.sh" >/tmp/waveline-prepare.log 2>&1; then
 		ok "kernel sources staged and patched"
 		KMAKE=(make -C "$KB" M="$ROOT/src")
@@ -1148,6 +1192,7 @@ else
 			   dkms build -m "$DKMS_NAME" -v "$DKMS_VER" -k "$KREL" >/dev/null 2>&1 &&
 			   dkms install -m "$DKMS_NAME" -v "$DKMS_VER" -k "$KREL" --force >/dev/null 2>&1; then
 				ok "installed via dkms (rebuilt automatically on kernel updates)"
+				printf '%s\n' "$KERNEL_HASH" > "$KERNEL_STAMP"
 			else
 				warn "dkms install failed -- see /var/lib/dkms/$DKMS_NAME/$DKMS_VER/build/make.log"
 				FAILED_KERNEL=1
@@ -1398,7 +1443,7 @@ else
 		warn "    log out and back in for real-time scheduling to take effect"
 	fi
 
-	ok "  the mixer's Audio diagnostics window reports whether it took"
+	ok "  the mixer's Settings & Diagnostics window reports whether it took"
 fi
 
 # ------------------------------------------------ 5. JACK compatibility (DAWs)
@@ -1976,7 +2021,7 @@ if [[ $DFN_OK -eq 1 ]]; then
 	echo  "         DeepFilterNet is the default engine. It is markedly better on"
 	echo  "         steady noise (fans, keyboards, traffic) but costs 3-4x the CPU"
 	echo  "         of RNNoise per enabled filter. Switch engines any time in the"
-	echo  "         mixer under Application Settings -> NC engine."
+	echo  "         mixer under Settings & Diagnostics -> General -> Noise suppression."
 fi
 
 # ------------------------------------------------------------ apply + check

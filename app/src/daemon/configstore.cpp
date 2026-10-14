@@ -943,6 +943,8 @@ bool ConfigStore::load() {
     audio_.realtime = audio[QStringLiteral("realtime")].toBool(true);
     audio_.autoPauseNoiseSuppression =
         audio[QStringLiteral("autoPauseNoiseSuppression")].toBool(true);
+    audio_.cancelMonitorOnSpeakers =
+        audio[QStringLiteral("cancelMonitorOnSpeakers")].toBool(true);
 
     const QJsonObject diagnostics = root[QStringLiteral("diagnostics")].toObject();
     diagnostics_.dismissedRoutingSinks.clear();
@@ -1021,6 +1023,7 @@ bool ConfigStore::save() const {
     audio[QStringLiteral("outputHeadroom")] = audio_.outputHeadroom;
     audio[QStringLiteral("realtime")] = audio_.realtime;
     audio[QStringLiteral("autoPauseNoiseSuppression")] = audio_.autoPauseNoiseSuppression;
+    audio[QStringLiteral("cancelMonitorOnSpeakers")] = audio_.cancelMonitorOnSpeakers;
     root[QStringLiteral("audio")] = audio;
 
     QJsonObject diagnostics;

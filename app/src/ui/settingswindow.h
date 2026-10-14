@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 Nakildias <nakildiaspro@gmail.com>
 //
-// Latency & Diagnostics: the two latency controls, the warnings that can be
-// silenced, and everything a bug report needs.
+// Settings & Diagnostics: the settings that apply to the whole mixer (General),
+// the two latency controls, the warnings that can be silenced, and everything a
+// bug report needs.
 //
 // These used to be three things in the header bar -- two dropdowns and an info
 // button -- next to a status dot, a profile button, a tuner and a companion
@@ -42,6 +43,10 @@ protected:
     void hideEvent(QHideEvent *) override;
 
 private:
+    // Settings that apply to everything at once and are not about latency:
+    // which noise suppression model runs, and whether it pauses when nothing
+    // is listening.
+    QWidget *buildGeneralTab();
     QWidget *buildLatencyTab();
     // What a desktop shell's audio applet is allowed to show. Its own tab
     // rather than a row in Latency: nothing here is about this machine keeping
@@ -61,6 +66,14 @@ private:
     void onDspProfilingToggled(bool on);
     // Applies live, like the box above.
     void onNcAutoPauseToggled(bool on);
+    // Applies live, like the box above.
+    void onSpeakerCutToggled(bool on);
+    // Asks the daemon to switch, and puts the combo back if it refuses.
+    void onNoiseEnginePicked(int index);
+    // Refills the engine selector from the daemon. Not free -- it asks the
+    // daemon to go looking for DeepFilterNet -- so it runs on Changed() rather
+    // than on the window's poll.
+    void refreshNoiseEngines();
     // Applies live and rebuilds nothing -- a shell re-reads the count on its
     // next poll -- so the change *is* the setting, same as the box above.
     void onShellNcInputsChanged(int count);
@@ -71,6 +84,7 @@ private:
     void syncRealtimeCheck();
     void syncDspProfilingCheck();
     void syncNcAutoPause();
+    void syncSpeakerCut();
     void syncDesktopTab();
 
     void refreshWarnings();
@@ -84,8 +98,11 @@ private:
     QLabel *headroomPending_ = nullptr;
     QCheckBox *realtimeCheck_ = nullptr;
     QCheckBox *dspProfilingCheck_ = nullptr;
+    QComboBox *noiseEngine_ = nullptr;
     QCheckBox *ncAutoPauseCheck_ = nullptr;
     QLabel *ncAutoPauseStatus_ = nullptr;
+    QCheckBox *speakerCutCheck_ = nullptr;
+    QLabel *speakerCutStatus_ = nullptr;
     QSpinBox *shellNcSpin_ = nullptr;
     QLabel *shellStatus_ = nullptr;
     // Set while a sync is writing into a combo, so the resulting activated

@@ -563,8 +563,10 @@ private:
         const QRect painted = current.adjusted(0, 0, -1, -1);
         if (painted.isEmpty()) return;
 #ifdef WAVELINE_HAVE_KWINDOWSYSTEM
+        // None while Blur & Transparency is off: the menu is solid then anyway.
         KWindowEffects::enableBlurBehind(
-            window, true, roundedRegion(painted, cornerRadiusFor(painted.width(), painted.height())));
+            window, Settings::instance().blurEnabled(),
+            roundedRegion(painted, cornerRadiusFor(painted.width(), painted.height())));
 #endif
         if (QGuiApplication::platformName().startsWith(QStringLiteral("wayland")))
             window->setMask(roundedRegion(current, cornerRadiusFor(current.width(), current.height())));

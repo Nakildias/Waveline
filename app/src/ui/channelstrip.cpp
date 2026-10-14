@@ -6,13 +6,12 @@
 #include <algorithm>
 
 #include <QApplication>
-#include <QDrag>
 #include <QEvent>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
@@ -24,6 +23,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 
 
@@ -35,69 +35,108 @@ namespace {
 constexpr int kCardWidth = 122;
 constexpr int kWideCardWidth = 168;
 
-// The rounded, colour-filled square holding the channel's icon. Painted rather
-// than styled so the corner radius actually clips the fill.
-class IconTile : public QWidget {
+// The gap between two faders, made into a handle for both. Only the band
+// around the two handles answers the mouse (the rest of the gap is the card's,
+// for dragging it along the row); there a line joins the two handles while
+// the pointer is over it, and a drag moves both by the same amount, so the
+// balance between them is kept.
+class GangGrip : public QWidget {
 public:
-    IconTile(const QString &iconName, const QColor &color, QWidget *parent)
-        : QWidget(parent), icon_(iconName), color_(color) {
-        setFixedSize(28, 28);
+    GangGrip(Fader *a, Fader *b, QWidget *parent) : QWidget(parent), a_(a), b_(b) {
+        setMouseTracking(true);
+        setCursor(Qt::SizeVerCursor);
+        setToolTip(QObject::tr("Drag between the two handles to move both faders."));
+        for (Fader *f : {a_, b_}) {
+            QObject::connect(f, &QSlider::valueChanged, this, [this] { sync(); });
+        }
     }
 
-    void setAppearance(const QString &iconName, const QColor &color) {
-        icon_ = iconName;
-        color_ = color;
+    void setAccent(const QColor &c) {
+        accent_ = c;
         update();
     }
 
-    // The tile is the card's identity, so it is also where the identity is
-    // edited. A callback rather than a signal: this class lives in a .cpp and
-    // is not worth a moc pass of its own.
-    void setOnClicked(std::function<void()> fn) {
-        onClick_ = std::move(fn);
-        setCursor(onClick_ ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    // Laid in the gap between the two faders, and masked to the band around
+    // their handles.
+    void sync() {
+        QWidget *host = parentWidget();
+        if (!host || !a_->isVisibleTo(host) || !b_->isVisibleTo(host)) {
+            hide();
+            return;
+        }
+        const QRect ra(a_->mapTo(host, QPoint(0, 0)), a_->size());
+        const QRect rb(b_->mapTo(host, QPoint(0, 0)), b_->size());
+        const int left = ra.right() + 1;
+        const int right = rb.left() - 1;
+        if (right - left < 4) {
+            hide();
+            return;
+        }
+        const int top = std::min(ra.top(), rb.top());
+        const int bottom = std::max(ra.bottom(), rb.bottom());
+        setGeometry(QRect(QPoint(left, top), QPoint(right, bottom)));
+        ya_ = qRound(ra.top() - top + a_->handleCenter());
+        yb_ = qRound(rb.top() - top + b_->handleCenter());
+        const int from = std::min(ya_, yb_) - kReach;
+        const int to = std::max(ya_, yb_) + kReach;
+        setMask(QRegion(0, from, width(), to - from));
+        show();
+        raise();
+        update();
     }
 
 protected:
     void paintEvent(QPaintEvent *) override {
+        if (!hover_ && !dragging_) return;
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        QPainterPath path;
-        path.addRoundedRect(QRectF(rect()), 8, 8);
-        p.fillPath(path, color_);
-        const int px = 18;
-        // Dark glyph on a pale tile: the icon has to stay readable whatever
-        // colour the card has been given.
-        p.drawPixmap(QPointF((width() - px) / 2.0, (height() - px) / 2.0),
-                     Theme::iconPixmap(icon_, Theme::glyphOn(color_), px));
-        // A hairline on hover, so the tile advertises that it does something
-        // without carrying a permanent border.
-        if (hover_ && onClick_) {
-            QColor ring = Theme::glyphOn(color_);
-            ring.setAlpha(150);
-            p.setPen(QPen(ring, 1.5));
-            p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(QRectF(rect()).adjusted(0.75, 0.75, -0.75, -0.75),
-                              7, 7);
-        }
+        QColor c = accent_;
+        c.setAlpha(dragging_ ? 230 : 160);
+        p.setPen(QPen(c, 3, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(QPointF(0, ya_), QPointF(width(), yb_));
     }
-
-    void enterEvent(QEnterEvent *) override { hover_ = true; update(); }
-    void leaveEvent(QEvent *) override { hover_ = false; update(); }
-
+    void enterEvent(QEnterEvent *) override {
+        hover_ = true;
+        update();
+    }
+    void leaveEvent(QEvent *) override {
+        hover_ = false;
+        update();
+    }
     void mousePressEvent(QMouseEvent *e) override {
-        if (e->button() == Qt::LeftButton && onClick_) {
-            onClick_();
-            return;
-        }
-        QWidget::mousePressEvent(e);
+        if (e->button() != Qt::LeftButton) return;
+        dragging_ = true;
+        startY_ = e->position().y();
+        startA_ = a_->value();
+        startB_ = b_->value();
+        for (Fader *f : {a_, b_}) f->setSliderDown(true);
+        update();
+    }
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (!dragging_) return;
+        // Up is louder, as on the faders themselves.
+        const double dy = startY_ - e->position().y();
+        a_->setValue(startA_ + qRound(dy * (a_->maximum() - a_->minimum()) / a_->travel()));
+        b_->setValue(startB_ + qRound(dy * (b_->maximum() - b_->minimum()) / b_->travel()));
+    }
+    void mouseReleaseEvent(QMouseEvent *) override {
+        dragging_ = false;
+        for (Fader *f : {a_, b_}) f->setSliderDown(false);
+        update();
     }
 
 private:
-    QString icon_;
-    QColor color_;
+    static constexpr int kReach = 9;
+    Fader *a_;
+    Fader *b_;
+    QColor accent_ = Theme::Accent;
+    int ya_ = 0;
+    int yb_ = 0;
     bool hover_ = false;
-    std::function<void()> onClick_;
+    bool dragging_ = false;
+    double startY_ = 0;
+    int startA_ = 0;
+    int startB_ = 0;
 };
 
 // The same colour, softened, for anything sitting behind text.
@@ -111,67 +150,50 @@ QColor accentTint(const QColor &c, int alpha) {
 
 ChannelStrip::ChannelStrip(const QString &id, const QString &name, QWidget *parent)
     : CardBase(parent), id_(id), color_(Theme::channelColor(id)) {
-    setFixedWidth(kCardWidth);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    setBaseWidth(kCardWidth);
     setRadius(12);
-    setTopStripe(color_);
+    // A shade lighter than the cards elsewhere, and outlined in the channel's
+    // colour where a strip of it used to run along the top.
+    setFillColor(Theme::CardHover);
+    setBorderColor(color_);
 
     auto *lay = new QVBoxLayout(this);
     lay->setContentsMargins(10, 12, 10, 10);
     lay->setSpacing(8);
 
     // ------------------------------------------------------------- header
-    auto *head = new QHBoxLayout;
-    head_ = head;
-    head->setSpacing(7);
+    // The badge is centred; whatever the card adds to its header (the ear)
+    // sits hard right in the same cell, so it never pulls the badge over.
+    auto *head = new QGridLayout;
+    head->setContentsMargins(0, 0, 0, 0);
     badgeTile_ = new IconTile(Theme::channelIconName(id), color_, this);
     iconName_ = Theme::channelIconName(id);
     badgeTile_->setToolTip(tr("Name, colour and icon for this card."));
     static_cast<IconTile *>(badgeTile_)
         ->setOnClicked([this] { emit identityClicked(); });
-    head->addWidget(badgeTile_);
+    head->addWidget(badgeTile_, 0, 0, Qt::AlignHCenter | Qt::AlignVCenter);
 
+    head_ = new QHBoxLayout;
+    head_->setSpacing(7);
+    head->addLayout(head_, 0, 0, Qt::AlignRight | Qt::AlignVCenter);
+    lay->addLayout(head);
+
+    // No meter across the top: each fader's track is its meter -- see
+    // buildColumn() and setLevel().
+
+    // --------------------------------------------------------------- name
+    // Above the faders, centred: where the card says what it is.
+    nameRow_ = new QHBoxLayout;
     auto *title = new QLabel(name, this);
     titleLabel_ = title;
     QFont tf = title->font();
     tf.setBold(true);
     title->setFont(tf);
+    title->setAlignment(Qt::AlignCenter);
     title->setToolTip(name);
-    head->addWidget(title, 1);
-    lay->addLayout(head);
-
-    // -------------------------------------------------------------- meter
-    meter_ = new LevelMeter(Qt::Horizontal, this);
-    meter_->setThickness(5);
-    meter_->setTint(color_);
-    meter_->setToolTip(tr("Signal reaching this channel."));
-    lay->addWidget(meter_);
-
-    // The channel's own microphone, tapped after its noise suppression and EQ,
-    // so switching NC on visibly drops the floor between words.
-    micMeter_ = new LevelMeter(Qt::Horizontal, this);
-    micMeter_->setThickness(3);
-    micMeter_->setTint(Theme::Inactive);
-    micMeter_->setToolTip(
-        tr("This channel publishes no microphone.\n"
-           "Turn one on in the effects panel to meter it here."));
-    lay->addWidget(micMeter_);
-
-    // --------------------------------------------------------------- link
-    auto *linkRow = new QHBoxLayout;
-    linkRow->addStretch();
-    link_ = new EqualToggle(this);
-    link_->setAccent(color_);
-    link_->setToolTip(tr("Keep both faders equal: move either one and the other "
-                         "follows to the same value.\n"
-                         "Switching it on does not move anything by itself -- "
-                         "they match from the next time you touch one, so "
-                         "enabling it cannot silently change what your audience "
-                         "hears. Remembered per card between sessions."));
-    connect(link_, &QAbstractButton::toggled, this,
-            [this](bool on) { emit fadersLinkedChanged(on); });
-    linkRow->addWidget(link_);
-    linkRow->addStretch();
-    lay->addLayout(linkRow);
+    nameRow_->addWidget(title, 1);
+    lay->addLayout(nameRow_);
 
     // ------------------------------------------------------------- faders
     cols_ = new QHBoxLayout;
@@ -190,6 +212,10 @@ ChannelStrip::ChannelStrip(const QString &id, const QString &name, QWidget *pare
                                 stream_),
                     1);
     lay->addLayout(cols, 1);
+
+    auto *grip = new GangGrip(monitor_.fader, stream_.fader, this);
+    grip->setAccent(color_);
+    gangGrip_ = grip;
 
     // Heartbeat is centred in the full footer width; slot number and gear sit
     // in fixed-width side boxes so they do not pull the toggle off centre.
@@ -246,14 +272,14 @@ void ChannelStrip::setMasterSlotNumber(int slot) {
     masterSlot_ = slot;
     if (slot < 1) {
         slotLabel_->setVisible(false);
-        if (deleteButton_) deleteButton_->setVisible(false);
+        if (rackButton_) rackButton_->setVisible(false);
         if (rebuildButton_) rebuildButton_->setVisible(false);
         return;
     }
     slotLabel_->setText(QString::number(slot));
     updateSlotTooltip();
     slotLabel_->setVisible(true);
-    if (deleteButton_) deleteButton_->setVisible(true);
+    if (rackButton_) rackButton_->setVisible(true);
     if (rebuildButton_) rebuildButton_->setVisible(true);
     positionOverlays();
 }
@@ -296,19 +322,35 @@ void ChannelStrip::updateSlotTooltip() {
     slotLabel_->setToolTip(tip);
 }
 
-void ChannelStrip::enableMasterDelete(bool on) {
-    masterDeleteEnabled_ = on;
-    if (on && !deleteButton_) {
-        deleteButton_ = new IconToggle(QStringLiteral("trash"),
-                                       QStringLiteral("trash"), footerHost_);
-        deleteButton_->setCheckable(false);
-        deleteButton_->setIconSize(14);
-        deleteButton_->setToolTip(tr("Remove this input device."));
-        connect(deleteButton_, &QAbstractButton::clicked, this,
-                &ChannelStrip::masterDeleteRequested);
+void ChannelStrip::enableMasterRack(bool on) {
+    masterRackEnabled_ = on;
+    if (on && !rackButton_) {
+        rackButton_ = new IconToggle(QStringLiteral("rack"),
+                                     QStringLiteral("rack"), footerHost_);
+        rackButton_->setCheckable(false);
+        rackButton_->setIconSize(14);
+        rackButton_->setToolTip(tr("Open the Creative FX Virtual Rack."));
+        connect(rackButton_, &QAbstractButton::clicked, this,
+                &ChannelStrip::rackRequested);
         positionOverlays();
     }
-    if (deleteButton_) deleteButton_->setVisible(on && slotLabel_ && slotLabel_->isVisible());
+    if (rackButton_) rackButton_->setVisible(on && slotLabel_ && slotLabel_->isVisible());
+}
+
+void ChannelStrip::enableChannelRack(bool on) {
+    if (on && !channelRackButton_) {
+        channelRackButton_ = new IconToggle(QStringLiteral("rack"), QStringLiteral("rack"),
+                                            footerLeftBox_);
+        channelRackButton_->setCheckable(false);
+        channelRackButton_->setIconSize(14);
+        channelRackButton_->setToolTip(tr("Open the Creative FX Virtual Rack."));
+        connect(channelRackButton_, &QAbstractButton::clicked, this,
+                &ChannelStrip::rackRequested);
+        // A channel shows no slot number, so the box on the gear's opposite
+        // side is free for it.
+        footerLeftBox_->layout()->addWidget(channelRackButton_);
+    }
+    if (channelRackButton_) channelRackButton_->setVisible(on);
 }
 
 void ChannelStrip::enableMasterRebuild(bool on) {
@@ -338,6 +380,15 @@ void ChannelStrip::setAddMasterOverlayButton(QPushButton *btn) {
     }
 }
 
+void ChannelStrip::setRemoveMasterOverlayButton(QPushButton *btn) {
+    removeMasterOverlay_ = btn;
+    if (btn) {
+        btn->setParent(this);
+        btn->hide();
+        scheduleOverlayLayout();
+    }
+}
+
 void ChannelStrip::scheduleOverlayLayout() {
     if (overlayLayoutScheduled_) return;
     overlayLayoutScheduled_ = true;
@@ -346,23 +397,24 @@ void ChannelStrip::scheduleOverlayLayout() {
         if (layout()) layout()->activate();
         positionOverlays();
         if (addMasterOverlay_) addMasterOverlay_->show();
+        if (removeMasterOverlay_) removeMasterOverlay_->show();
     });
 }
 
 void ChannelStrip::showEvent(QShowEvent *event) {
     CardBase::showEvent(event);
-    if (addMasterOverlay_ || deleteButton_ || rebuildButton_) scheduleOverlayLayout();
+    if (addMasterOverlay_ || rackButton_ || rebuildButton_ || gangGrip_) scheduleOverlayLayout();
 }
 
-void ChannelStrip::positionDeleteButton() {
-    if (!deleteButton_ || !footerHost_ || !footerLeftBox_) return;
-    const QSize sh = deleteButton_->sizeHint();
+void ChannelStrip::positionRackButton() {
+    if (!rackButton_ || !footerHost_ || !footerLeftBox_) return;
+    const QSize sh = rackButton_->sizeHint();
     const QRect left = footerLeftBox_->geometry();
     const int x = left.right() + 1;
     const int y = left.y() + (left.height() - sh.height()) / 2;
-    deleteButton_->setFixedSize(sh);
-    deleteButton_->move(x, y);
-    deleteButton_->raise();
+    rackButton_->setFixedSize(sh);
+    rackButton_->move(x, y);
+    rackButton_->raise();
 }
 
 void ChannelStrip::positionRebuildButton() {
@@ -394,10 +446,18 @@ void ChannelStrip::positionAddMasterButton() {
     addMasterOverlay_->setFixedSize(side, side);
     addMasterOverlay_->move(x, y);
     addMasterOverlay_->raise();
+
+    if (removeMasterOverlay_) {
+        constexpr int kGap = 4;
+        removeMasterOverlay_->setFixedSize(side, side);
+        removeMasterOverlay_->move(x, y + side + kGap);
+        removeMasterOverlay_->raise();
+    }
 }
 
 void ChannelStrip::positionOverlays() {
-    positionDeleteButton();
+    if (gangGrip_) static_cast<GangGrip *>(gangGrip_)->sync();
+    positionRackButton();
     positionRebuildButton();
     positionAddMasterButton();
 }
@@ -421,70 +481,62 @@ void ChannelStrip::enableEditableTitle(bool on) {
     }
 }
 
-const char *ChannelStrip::dragMimeType() {
-    return "application/x-waveline-channel";
-}
-
 void ChannelStrip::enableDragHandle(bool on) {
-    if (!link_ || dragHandle_ == on) return;
     dragHandle_ = on;
-    if (on) {
-        link_->installEventFilter(this);
-        // An open hand rather than a closed one: the card is not held yet.
-        link_->setCursor(Qt::OpenHandCursor);
-        link_->setToolTip(link_->toolTip() +
-                          tr("\n\nDrag this button to move the card along the "
-                             "row."));
-    } else {
-        link_->removeEventFilter(this);
-        link_->unsetCursor();
-    }
+    // An open hand rather than a closed one: the card is not held yet. The
+    // controls on it keep their own cursors.
+    if (on) setCursor(Qt::OpenHandCursor);
+    else unsetCursor();
 }
 
-bool ChannelStrip::maybeStartReorderDrag(QMouseEvent *me) {
-    if (!dragArmed_) return false;
-    if ((me->pos() - dragPress_).manhattanLength() <
-        QApplication::startDragDistance())
-        return false;
-
-    // Past the threshold this is a drag, not a click. Disarm first: exec()
-    // below runs its own event loop, and re-entering here would start a
-    // second drag inside the first.
-    dragArmed_ = false;
-
-    auto *mime = new QMimeData;
-    mime->setData(QString::fromLatin1(dragMimeType()), id_.toUtf8());
-
-    auto *drag = new QDrag(this);
-    drag->setMimeData(mime);
-    // The card itself is the cursor, at half strength so the row it is being
-    // dragged over stays readable underneath it.
-    QPixmap shot(size() * devicePixelRatioF());
-    shot.setDevicePixelRatio(devicePixelRatioF());
-    shot.fill(Qt::transparent);
-    render(&shot);
-    QPixmap faded(shot.size());
-    faded.setDevicePixelRatio(shot.devicePixelRatioF());
-    faded.fill(Qt::transparent);
-    {
-        QPainter p(&faded);
-        p.setOpacity(0.7);
-        p.drawPixmap(0, 0, shot);
+void ChannelStrip::mousePressEvent(QMouseEvent *event) {
+    if (dragHandle_ && event->button() == Qt::LeftButton) {
+        dragArmed_ = true;
+        dragPress_ = event->pos();
+        event->accept();
+        return;
     }
-    drag->setPixmap(faded);
-    drag->setHotSpot(link_->mapTo(this, dragPress_));
+    CardBase::mousePressEvent(event);
+}
 
-    // exec() runs a nested event loop, and deferred deletions are processed
-    // inside it -- so a channel that goes away mid-drag takes this card with
-    // it and everything below would be touching freed memory.
-    QPointer<ChannelStrip> alive(this);
-    drag->exec(Qt::MoveAction);
-    if (!alive) return true;
+void ChannelStrip::mouseMoveEvent(QMouseEvent *event) {
+    if (dragging_) {
+        emit reorderMoved(event->globalPosition().toPoint());
+        return;
+    }
+    if (dragArmed_ && (event->pos() - dragPress_).manhattanLength() >=
+                          QApplication::startDragDistance()) {
+        // Past the threshold this is a move, not a click.
+        dragArmed_ = false;
+        dragging_ = true;
+        setCursor(Qt::ClosedHandCursor);
+        emit reorderStarted(mapToGlobal(dragPress_),
+                            event->modifiers() & Qt::ControlModifier);
+        emit reorderMoved(event->globalPosition().toPoint());
+        return;
+    }
+    CardBase::mouseMoveEvent(event);
+}
 
-    // The press that started this never got its release -- the drag ate it --
-    // so the button would otherwise stay visibly held down.
-    if (link_) link_->setDown(false);
-    return true;
+void ChannelStrip::mouseReleaseEvent(QMouseEvent *event) {
+    if (dragging_) {
+        dragging_ = false;
+        setCursor(Qt::OpenHandCursor);
+        emit reorderEnded();
+        return;
+    }
+    // A press on the name that never became a move: the click renames, as it
+    // did before the whole card could be grabbed. The card took the press, so
+    // the name never sees this release itself.
+    const bool wasClick = dragArmed_;
+    dragArmed_ = false;
+    if (wasClick && titleEditable_ && titleLabel_ && titleLabel_->isVisible() &&
+        QRect(titleLabel_->mapTo(this, QPoint(0, 0)), titleLabel_->size())
+            .contains(event->pos())) {
+        beginTitleEdit();
+        return;
+    }
+    CardBase::mouseReleaseEvent(event);
 }
 
 bool ChannelStrip::eventFilter(QObject *obj, QEvent *ev) {
@@ -492,29 +544,6 @@ bool ChannelStrip::eventFilter(QObject *obj, QEvent *ev) {
         auto *me = static_cast<QMouseEvent *>(ev);
         if (me->button() == Qt::LeftButton) beginTitleEdit();
         return true;
-    }
-    if (dragHandle_ && obj == link_) {
-        switch (ev->type()) {
-        case QEvent::MouseButtonPress: {
-            auto *me = static_cast<QMouseEvent *>(ev);
-            if (me->button() == Qt::LeftButton) {
-                dragArmed_ = true;
-                dragPress_ = me->pos();
-            }
-            // Not swallowed: a press that never travels must still reach the
-            // button and toggle it.
-            break;
-        }
-        case QEvent::MouseMove:
-            if (maybeStartReorderDrag(static_cast<QMouseEvent *>(ev)))
-                return true;
-            break;
-        case QEvent::MouseButtonRelease:
-            dragArmed_ = false;
-            break;
-        default:
-            break;
-        }
     }
     return CardBase::eventFilter(obj, ev);
 }
@@ -527,7 +556,8 @@ void ChannelStrip::beginTitleEdit() {
         QFont f = titleLabel_->font();
         titleEdit_->setFont(f);
         titleEdit_->setPlaceholderText(tr("Name"));
-        head_->insertWidget(1, titleEdit_, 1);
+        nameRow_->insertWidget(0, titleEdit_, 1);
+        titleEdit_->setAlignment(Qt::AlignCenter);
         connect(titleEdit_, &QLineEdit::editingFinished, this,
                 &ChannelStrip::finishTitleEdit);
     }
@@ -560,9 +590,8 @@ void ChannelStrip::setIdentityBadge(const QString &iconName, const QColor &color
     // Re-applied on every refresh pass, so it has to honour the grey a
     // disconnected device is wearing rather than paint over it.
     const QColor shown = deviceConnected_ ? color : Theme::Inactive;
-    setTopStripe(shown);
-    if (meter_) meter_->setTint(mainMeterActive_ && deviceConnected_ ? color
-                                                                    : Theme::Inactive);
+    setBorderColor(shown);
+    applyMeterTints();
     if (monitor_.fader) monitor_.fader->setAccent(shown);
     if (stream_.fader) stream_.fader->setAccent(shown);
     if (gain_.fader) gain_.fader->setAccent(shown);
@@ -594,8 +623,9 @@ void ChannelStrip::applyTitleEditAccent() {
 
 void ChannelStrip::applyAccentToToggles() {
     const QColor shown = deviceConnected_ ? color_ : Theme::Inactive;
-    if (link_) link_->setAccent(shown);
-    if (micMonitorButton_) micMonitorButton_->setAccent(shown);
+    if (gangGrip_) static_cast<GangGrip *>(gangGrip_)->setAccent(shown);
+    if (micMonitorButton_)
+        micMonitorButton_->setAccent(micMonitorBlocked_ ? Theme::Danger : shown);
     applyTitleEditAccent();
 }
 
@@ -604,7 +634,7 @@ void ChannelStrip::setDeviceConnected(bool on) {
     deviceConnected_ = on;
 
     const QColor shown = on ? color_ : Theme::Inactive;
-    setTopStripe(shown);
+    setBorderColor(shown);
     if (badgeTile_)
         static_cast<IconTile *>(badgeTile_)->setAppearance(iconName_, shown);
     if (monitor_.fader) monitor_.fader->setAccent(shown);
@@ -618,14 +648,12 @@ void ChannelStrip::setDeviceConnected(bool on) {
     // Tints only. The levels themselves are left alone: an unplugged
     // microphone reads silence on its own, and a bus that is still carrying
     // shared application audio should go on showing it.
-    if (meter_) meter_->setTint(mainMeterActive_ && on ? color_ : Theme::Inactive);
-    if (micMeter_)
-        micMeter_->setTint(micMeterActive_ && on ? Theme::Violet : Theme::Inactive);
+    applyMeterTints();
 }
 
 void ChannelStrip::enableGainFader(bool on) {
     if (on && !gain_.fader) {
-        setFixedWidth(kWideCardWidth);
+        setBaseWidth(kWideCardWidth);
         QHBoxLayout *cols = cols_;
         if (cols) {
             cols->addWidget(
@@ -658,13 +686,13 @@ void ChannelStrip::enableGainFader(bool on) {
     // back to its normal width, or a microphone with no preamp control gets a
     // card a third wider than every other one for no visible reason.
     if (gain_.host) gain_.host->setVisible(on);
-    if (!on && !micSend_.fader) setFixedWidth(kCardWidth);
+    if (!on && !micSend_.fader) setBaseWidth(kCardWidth);
     if (on && addMasterOverlay_) positionOverlays();
 }
 
 void ChannelStrip::enableMicSendFader(bool on) {
     if (on && !micSend_.fader) {
-        setFixedWidth(kWideCardWidth);
+        setBaseWidth(kWideCardWidth);
         QHBoxLayout *cols = cols_;
         if (cols) {
             cols->addWidget(
@@ -705,6 +733,50 @@ void ChannelStrip::setMicControlsActive(bool on) {
     if (micSend_.fader) micSend_.fader->setEnabled(on);
     if (micSend_.mute) micSend_.mute->setEnabled(on);
     if (micSend_.value) micSend_.value->setEnabled(on);
+}
+
+void ChannelStrip::setMicColumnShown(bool on) {
+    if (!micSend_.host) return;
+    const int was = micColumnShown_;
+    micColumnShown_ = on ? 1 : 0;
+    if (was == micColumnShown_) return;
+    const int target = on ? kWideCardWidth : kCardWidth;
+    if (was < 0 || !isVisible()) {
+        micSend_.host->setVisible(on);
+        setBaseWidth(target);
+        return;
+    }
+    // Growing, the column is there from the start and the three share the
+    // widening card; shrinking, it stays until the card is narrow again. Three
+    // faders fit in the narrow width, so nothing is clipped on the way.
+    if (on) micSend_.host->show();
+    animateWidthTo(target);
+}
+
+void ChannelStrip::setBaseWidth(int width) {
+    if (width == minimumWidth()) return;
+    // A floor, not a fixed size: with room to spare the window shares it out
+    // among the cards in proportion to this -- see MainWindow::updateRowStretch().
+    setMinimumWidth(width);
+    emit baseWidthChanged();
+}
+
+void ChannelStrip::animateWidthTo(int width) {
+    if (!widthAnim_) {
+        widthAnim_ = new QVariantAnimation(this);
+        widthAnim_->setDuration(220);
+        widthAnim_->setEasingCurve(QEasingCurve::OutCubic);
+        connect(widthAnim_, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant &v) { setBaseWidth(v.toInt()); });
+        connect(widthAnim_, &QVariantAnimation::finished, this, [this] {
+            if (micColumnShown_ == 0 && micSend_.host) micSend_.host->hide();
+            positionOverlays();
+        });
+    }
+    widthAnim_->stop();
+    widthAnim_->setStartValue(minimumWidth());
+    widthAnim_->setEndValue(width);
+    widthAnim_->start();
 }
 
 void ChannelStrip::setHardwareControlsEnabled(bool on) {
@@ -787,16 +859,23 @@ void ChannelStrip::setMicMonitorChecked(bool on) {
     micMonitorButton_->setChecked(on);
 }
 
-void ChannelStrip::addHeaderWidget(QWidget *w) {
-    if (head_ && w) head_->addWidget(w);
+void ChannelStrip::setMicMonitorBlocked(bool blocked) {
+    if (!micMonitorButton_ || micMonitorBlocked_ == blocked) return;
+    micMonitorBlocked_ = blocked;
+    if (blocked) {
+        micMonitorTip_ = micMonitorButton_->toolTip();
+        micMonitorButton_->setToolTip(
+            tr("Monitoring is cut: a Monitor mix is playing on speakers, which "
+               "would feed this microphone back into itself.\n"
+               "Mute that mix, or turn this off in Settings > General."));
+    } else if (!micMonitorTip_.isEmpty()) {
+        micMonitorButton_->setToolTip(micMonitorTip_);
+    }
+    applyAccentToToggles();
 }
 
-void ChannelStrip::setMeterTooltips(const QString &main, const QString &mic) {
-    if (meter_) meter_->setToolTip(main);
-    if (micMeter_) {
-        micMeter_->setToolTip(mic);
-        micMeterTipFixed_ = true;
-    }
+void ChannelStrip::addHeaderWidget(QWidget *w) {
+    if (head_ && w) head_->addWidget(w);
 }
 
 void ChannelStrip::makeMonitorColumnMaster(const QString &tip) {
@@ -816,12 +895,13 @@ void ChannelStrip::setMonitorColumnTip(const QString &faderTip,
 void ChannelStrip::setMixFadersVisible(bool on, const QString &disabledTip) {
     if (monitor_.host) monitor_.host->setVisible(on);
     if (stream_.host) stream_.host->setVisible(on);
-    if (link_) link_->setVisible(on);
+    // The grip between them goes with them; laid out again once they are.
+    if (gangGrip_) QTimer::singleShot(0, this, [this] { positionOverlays(); });
     if (!on && !disabledTip.isEmpty()) setToolTip(disabledTip);
     else if (on) setToolTip(QString());
-    if (!on) setFixedWidth(kCardWidth);
-    else if (gain_.host && gain_.host->isVisible()) setFixedWidth(kWideCardWidth);
-    else setFixedWidth(kCardWidth);
+    if (!on) setBaseWidth(kCardWidth);
+    else if (gain_.host && gain_.host->isVisible()) setBaseWidth(kWideCardWidth);
+    else setBaseWidth(kCardWidth);
 }
 
 void ChannelStrip::setMixColumnEnabled(const QString &mix, bool on,
@@ -931,6 +1011,9 @@ QWidget *ChannelStrip::buildColumn(const QString &mix, const QString &iconOn,
     out.fader = new Fader(col);
     out.fader->setAccent(color_);
     lay->addWidget(out.fader, 1, Qt::AlignHCenter);
+    // The level through this fader, as its track: see setLevel().
+    out.meter = attachTrackMeter(out.fader);
+    out.meter->setTint(color_);
 
     out.value = new QLabel(QStringLiteral("100"), col);
     out.value->setAlignment(Qt::AlignCenter);
@@ -971,20 +1054,9 @@ void ChannelStrip::onFaderMoved(const QString &mix, int value) {
     if (mix != QLatin1String("monitor") && mix != QLatin1String("stream")) return;
     const bool isMonitor = (mix == QLatin1String("monitor"));
     auto &self = isMonitor ? monitor_ : stream_;
-    auto &other = isMonitor ? stream_ : monitor_;
 
     self.value->setText(QString::number(value));
-
     self.last = value;
-
-    // Equalising, which is what the "=" on the button says it does. The
-    // alternative -- moving both by the same delta and preserving the gap --
-    // was what this did before, and it made the button's own icon a lie.
-    if (link_->isChecked() && !linking_ && other.fader->value() != value) {
-        linking_ = true;
-        other.fader->setValue(value);
-        linking_ = false;
-    }
     emit volumeChanged(id_, mix, value / 100.0);
 }
 
@@ -1017,49 +1089,54 @@ void ChannelStrip::setValues(double streamVol, bool streamMuted, double monitorV
     monitor_.value->setText(QString::number(m));
 }
 
-bool ChannelStrip::fadersLinked() const {
-    return link_ && link_->isChecked();
-}
-
-void ChannelStrip::setFadersLinked(bool on) {
-    if (!link_ || link_->isChecked() == on) return;
-    // Restoring a saved state, not a click: it must not echo back out and get
-    // written again, and it must not drag one fader onto the other -- linking
-    // only takes effect from the next move either way.
-    QSignalBlocker block(link_);
-    link_->setChecked(on);
-}
-
 void ChannelStrip::setLevel(double fraction) {
-    // A dead meter must read zero, not hold its last peak.
-    meter_->setLevel(mainMeterActive_ ? fraction : 0.0);
+    level_ = fraction;
+    // Each mix's track shows what this card sends into that mix: the level at
+    // its fader, nothing while it is muted. On an input device the Monitor
+    // send also needs the device to be monitored (setMainMeterActive()).
+    const auto through = [this](const MixColumn &col, bool live) {
+        if (!col.meter) return;
+        const bool on = live && col.fader && col.fader->isEnabled() &&
+                        !(col.mute && col.mute->isChecked());
+        col.meter->setLevel(on ? level_ * col.fader->value() / 100.0 : 0.0);
+    };
+    through(monitor_, mainMeterActive_);
+    through(stream_, true);
 }
 
 void ChannelStrip::setMainMeterActive(bool on) {
     if (on == mainMeterActive_) return;
     mainMeterActive_ = on;
-    meter_->setTint(on && deviceConnected_ ? color_ : Theme::Inactive);
-    if (!on) meter_->setLevel(0.0);
-}
-
-void ChannelStrip::setMainMeterTooltip(const QString &tip) {
-    if (meter_) meter_->setToolTip(tip);
+    applyMeterTints();
+    setLevel(level_);
 }
 
 void ChannelStrip::setMicLevel(double fraction) {
-    // A dead meter must read zero, not hold its last peak.
-    micMeter_->setLevel(micMeterActive_ ? fraction : 0.0);
+    // A channel's own microphone, through its send fader; an input device's
+    // published signal, behind its gain fader as it is.
+    if (micSend_.meter) {
+        const bool on = micMeterActive_ && !(micSend_.mute && micSend_.mute->isChecked());
+        micSend_.meter->setLevel(on ? fraction * micSend_.fader->value() / 100.0 : 0.0);
+    } else if (gain_.meter) {
+        gain_.meter->setLevel(micMeterActive_ ? fraction : 0.0);
+    }
 }
 
 void ChannelStrip::setMicMeterActive(bool on) {
     if (on == micMeterActive_) return;
     micMeterActive_ = on;
-    micMeter_->setTint(on && deviceConnected_ ? Theme::Violet : Theme::Inactive);
-    // Not on the microphone card, whose caption is set once and is always true.
-    if (!micMeterTipFixed_)
-        micMeter_->setToolTip(
-            on ? tr("This channel's microphone, after its noise suppression and EQ.")
-               : tr("This channel publishes no microphone.\n"
-                    "Turn one on in the effects panel to meter it here."));
-    if (!on) micMeter_->setLevel(0.0);
+    applyMeterTints();
+    if (!on) setMicLevel(0.0);
+}
+
+void ChannelStrip::applyMeterTints() {
+    // The card's colour while live; grey while the device is unplugged, or
+    // while that track has nothing it could be carrying.
+    const auto tint = [this](const MixColumn &col, bool live) {
+        if (col.meter) col.meter->setTint(live && deviceConnected_ ? color_ : Theme::Inactive);
+    };
+    tint(monitor_, mainMeterActive_);
+    tint(stream_, true);
+    tint(micSend_, micMeterActive_);
+    tint(gain_, micMeterActive_);
 }

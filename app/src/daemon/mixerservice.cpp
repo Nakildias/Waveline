@@ -127,6 +127,9 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
     });
     // Monitor, ducking and published-mic settings all land as Changed().
     connect(this, &MixerService::Changed, this, &MixerService::scheduleNcIdleCheck);
+    // A mix's icon, its mute, its device coming and going: all land as
+    // Changed(), and any of them can start or end the speaker cut.
+    connect(this, &MixerService::Changed, this, &MixerService::updateSpeakerGuard);
 
     // App lists and device pickers must update without a fast full-state GUI
     // poll. Registry/property events arrive in bursts; publish once after the
@@ -134,6 +137,8 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
     nodeChangedTimer_.setSingleShot(true);
     nodeChangedTimer_.setInterval(100);
     connect(&nodeChangedTimer_, &QTimer::timeout, this, &MixerService::Changed);
+    // An application started or stopped playing: its meter comes or goes.
+    connect(&nodeChangedTimer_, &QTimer::timeout, this, &MixerService::syncAppMeters);
 
     // Which desktop shell is on the bus changes nothing about how the mixer
     // behaves; it is reported so a client can say so, and so a shell that
@@ -284,6 +289,14 @@ MixerService::~MixerService() {
     graph_.reset();
     waveline::FilterHost::stop();
 }
+
+namespace {
+// A Monitor mix's look in the card table, by its number (1-based). Must match
+// the window's monitorMixCardKey().
+QString monitorMixCardKey(int number) {
+    return QStringLiteral("mix:monitor:%1").arg(number);
+}
+}  // namespace
 
 namespace {
 
@@ -1334,6 +1347,8 @@ bool MixerService::start(QString &error) {
         meters_->watch("monitor-mix", waveline::MixerGraph::kMonitorMix, meterErr);
         meters_->watch("stream-mix", waveline::MixerGraph::kStreamMix, meterErr);
         meters_->watch("sound-share", waveline::MixerGraph::kSoundShareSink, meterErr);
+        // Applications already playing when the daemon starts.
+        syncAppMeters();
     }
 
     // The config itself was read at the top of this function, ahead of the first
@@ -4179,10 +4194,22 @@ QStringList MixerService::Levels() const {
         // from "<id>-src" scaled by that card's Monitor fader.
         for (const auto &[key, peak] : meters_->levels()) {
             peaks.insert({key, peak});
+            // Application streams are reported per application below.
+            if (key.rfind("app-stream-", 0) == 0) continue;
             out << QStringLiteral("%1\t%2")
                        .arg(QString::fromStdString(key))
                        .arg(peak);
         }
+        // "app-<row>": the loudest of an application's streams.
+        std::map<uint32_t, float> apps;
+        for (const auto &[stream, row] : appMeterStreams_) {
+            const auto it = peaks.find("app-stream-" + std::to_string(stream));
+            if (it == peaks.end()) continue;
+            float &v = apps[row];
+            v = std::max(v, it->second);
+        }
+        for (const auto &[row, peak] : apps)
+            out << QStringLiteral("app-%1\t%2").arg(row).arg(peak);
     }
     // The microphone's before/after levels and the speech probability ride
     // along here rather than being three more methods. Everything a meter
@@ -4894,12 +4921,12 @@ QStringList MixerService::GraphDiagnostics() const {
         // the difference between a setting and a bug report.
         row(tr("Real-time scheduling"), tr("off"),
             rt.dataLoops > 0
-                ? tr("Turned off in Latency & Diagnostics. All %1 audio threads "
+                ? tr("Turned off in Settings & Diagnostics. All %1 audio threads "
                      "run at ordinary priority, so a busy CPU can starve them "
                      "and be heard as clicks -- most likely at small buffer "
                      "sizes.")
                       .arg(rt.dataLoops)
-                : tr("Turned off in Latency & Diagnostics."));
+                : tr("Turned off in Settings & Diagnostics."));
     } else if (rt.dataLoops == 0) {
         row(tr("Real-time scheduling"), tr("unknown"),
             tr("No PipeWire data loops found in this process yet."));
@@ -5382,6 +5409,8 @@ bool MixerService::processedMicHasListener() const {
     // count; neither does anything while the whole Monitor mix is silent.
     const Profile &p = config_.live();
     if (p.monitorMasterMuted || p.monitorMaster <= 0.0) return false;
+    // Cut for speakers: nobody hears the monitor.
+    if (speakerGuard_) return false;
     if (p.softwareMonitor && p.micMonitorFx && !micMonitorMuted_ && micMonitorLevel_ > 0.0)
         return true;
     for (const MasterBusState &m : p.masterBuses) {
@@ -5435,6 +5464,54 @@ void MixerService::SetAutoPauseNoiseSuppression(bool on) {
     config_.audio().autoPauseNoiseSuppression = on;
     scheduleSave();
     updateNcIdle();
+    emit Changed();
+}
+
+bool MixerService::CancelMonitorOnSpeakers() const {
+    return config_.audio().cancelMonitorOnSpeakers;
+}
+
+void MixerService::SetCancelMonitorOnSpeakers(bool on) {
+    if (config_.audio().cancelMonitorOnSpeakers == on) return;
+    config_.audio().cancelMonitorOnSpeakers = on;
+    scheduleSave();
+    updateSpeakerGuard();
+    emit Changed();
+}
+
+bool MixerService::MonitorCancelledBySpeakers() const { return speakerGuard_; }
+
+bool MixerService::speakersAudible() const {
+    if (!graph_) return false;
+    const Profile &p = config_.live();
+    if (p.monitorMasterMuted || p.monitorMaster <= 0.0) return false;
+    const auto &outs = graph_->monitorOutputs();
+    for (size_t i = 0; i < outs.size(); ++i) {
+        const waveline::MonitorOutputEntry &e = outs[i];
+        if (e.sink.empty() || e.muted || e.volume <= 0.0f) continue;
+        if (!graph_->monitorOutputOnline(i)) continue;
+        // The card's icon is the only place the mixer says what a device is.
+        // The key matches the window's monitorMixCardKey(): by number.
+        const auto look = p.cardAppearance.constFind(
+            monitorMixCardKey(static_cast<int>(i) + 1));
+        if (look != p.cardAppearance.constEnd() &&
+            look->icon.startsWith(QLatin1String("speaker")))
+            return true;
+    }
+    return false;
+}
+
+void MixerService::updateSpeakerGuard() {
+    if (!graph_) return;
+    const bool cut = config_.audio().cancelMonitorOnSpeakers && speakersAudible();
+    // Every time, not only on a change: an input added while the cut holds
+    // has a monitor path of its own to silence.
+    graph_->setInputMonitorCut(cut);
+    if (cut == speakerGuard_) return;
+    speakerGuard_ = cut;
+    qInfo("waveline: input monitoring %s",
+          cut ? "cut: a Monitor mix is playing on speakers"
+              : "restored: no Monitor mix is playing on speakers");
     emit Changed();
 }
 
@@ -6897,6 +6974,58 @@ QStringList MixerService::NoiseEngines() const {
 
 // ---- routing ----------------------------------------------------------------
 
+// One tap per application playback stream, reported per Apps() row as
+// "app-<row id>". The tap records the stream itself (by its object.serial, not
+// a sink's monitor), so it reads the application before the mixer's own
+// per-application gain -- the GUI applies the slider, as the cards apply their
+// faders. WirePlumber links it beside the stream's own link and leaves that
+// alone; the probe's dont-fallback/linger/dont-move (see LevelProbe::watch)
+// keep it from ever landing anywhere else.
+void MixerService::syncAppMeters() {
+    if (!meters_) return;
+    const auto nodes = engine_.nodes();
+    const auto playing = [](const waveline::PwNode &n) {
+        if (n.isOurs || n.mediaClass != "Stream/Output/Audio" || n.objectSerial.empty())
+            return false;
+        const std::string name = waveline::appDisplayName(n);
+        return !name.empty() && name.rfind("waveline-", 0) != 0;
+    };
+    // The same merge as mergedPlaybackApps(): an application's streams share
+    // one row, under the lowest of their ids.
+    std::map<std::string, uint32_t> rowFor;
+    for (const auto &n : nodes) {
+        if (!playing(n)) continue;
+        uint32_t &row = rowFor[waveline::appMergeKey(n)];
+        if (row == 0 || n.id < row) row = n.id;
+    }
+    std::map<uint32_t, uint32_t> want;
+    std::map<uint32_t, std::string> serials;
+    for (const auto &n : nodes) {
+        if (!playing(n)) continue;
+        want[n.id] = rowFor[waveline::appMergeKey(n)];
+        serials[n.id] = n.objectSerial;
+    }
+
+    const auto key = [](uint32_t stream) { return "app-stream-" + std::to_string(stream); };
+    for (auto it = appMeterStreams_.begin(); it != appMeterStreams_.end();) {
+        if (want.count(it->first)) {
+            ++it;
+            continue;
+        }
+        meters_->unwatch(key(it->first));
+        it = appMeterStreams_.erase(it);
+    }
+    for (const auto &[stream, row] : want) {
+        if (appMeterStreams_.count(stream)) {
+            appMeterStreams_[stream] = row;  // its row may have moved
+            continue;
+        }
+        std::string err;
+        if (meters_->watch(key(stream), serials[stream], err, false))
+            appMeterStreams_[stream] = row;
+    }
+}
+
 QStringList MixerService::Apps() const {
     QStringList out;
     for (const ListedApp &row : mergedPlaybackApps(engine_, router_.get())) {
@@ -7709,22 +7838,52 @@ void MixerService::SetMonitorOutputAt(int index, const QString &sinkName) {
     emit Changed();
 }
 
+void MixerService::SwapMonitorOutputs(int a, int b) {
+    if (!graph_ || a < 0 || b < 0) return;
+    if (!graph_->swapMonitorOutputs(static_cast<size_t>(a), static_cast<size_t>(b)))
+        return;
+    QList<MonitorOutputState> &saved = config_.live().monitorOutputs;
+    if (a < saved.size() && b < saved.size()) saved.swapItemsAt(a, b);
+    scheduleSave();
+    emit Changed();
+}
+
 void MixerService::AddMonitorOutput(const QString &sinkName) {
     if (!graph_ || sinkName.isEmpty()) return;
     if (graph_->monitorOutputs().size() >= waveline::MixerGraph::kMaxMonitorOutputs)
         return;
     std::string err;
-    if (!graph_->addMonitorOutput(sinkName.toStdString(), err))
+    const int number = static_cast<int>(graph_->monitorOutputs().size()) + 1;
+    if (!graph_->addMonitorOutput(sinkName.toStdString(), err)) {
         lastError_ = QString::fromStdString(err);
+    } else {
+        // A new mix starts with the default look, not whatever a mix that once
+        // had this number left behind.
+        config_.live().cardAppearance.remove(monitorMixCardKey(number));
+    }
     scheduleSave();
     emit Changed();
 }
 
 void MixerService::RemoveMonitorOutput(int index) {
     if (!graph_ || index < 1) return;
+    const int count = static_cast<int>(graph_->monitorOutputs().size());
     std::string err;
-    if (!graph_->removeMonitorOutput(static_cast<size_t>(index), err))
+    if (!graph_->removeMonitorOutput(static_cast<size_t>(index), err)) {
         lastError_ = QString::fromStdString(err);
+    } else {
+        // A mix's look is kept under its number, and every mix after the one
+        // removed has just moved down by one. Their looks move with them, or
+        // each would put on the look of the mix that used to be before it.
+        // A mix with no look of its own leaves none behind either.
+        auto &looks = config_.live().cardAppearance;
+        for (int n = index + 2; n <= count; ++n) {
+            const auto it = looks.constFind(monitorMixCardKey(n));
+            if (it != looks.constEnd()) looks.insert(monitorMixCardKey(n - 1), *it);
+            else looks.remove(monitorMixCardKey(n - 1));
+        }
+        looks.remove(monitorMixCardKey(count));
+    }
     scheduleSave();
     emit Changed();
 }

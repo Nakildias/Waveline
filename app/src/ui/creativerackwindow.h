@@ -88,8 +88,12 @@ class VirtualRackWindow : public QWidget {
     Q_OBJECT
 
 public:
+    // `masterId` is an input device's bus id; with `channel`, it is a
+    // channel's id instead, and the rack is that channel's own Creative FX on
+    // its application audio -- the same effects its effects window shows,
+    // live whether or not the rack is open.
     VirtualRackWindow(MixerClient *client, const QString &masterId, const QString &title,
-                      QWidget *parent = nullptr);
+                      QWidget *parent = nullptr, bool channel = false);
 
 protected:
     void showEvent(QShowEvent *e) override;
@@ -146,8 +150,16 @@ private:
 
     MixerClient *client_ = nullptr;
     QString masterId_;
+    bool channel_ = false;
+    // The rack's effects: an input's rack spec, or a channel's output stage.
+    CreativeFxInfo readFx() const;
+    void writeFx(const CreativeFxInfo &info);
     QVBoxLayout *modulesLay_ = nullptr;
     QWidget *modulesContainer_ = nullptr;
+    // The scroll area round the modules, which sizes the window: see RackScroll.
+    QWidget *modulesScroll_ = nullptr;
+    // Sizes the window to its modules now, rather than whenever Qt gets to it.
+    void fitToModules();
     // QPushButtons in the universal look, Monarchy toolbar buttons there.
     QAbstractButton *addBtn_ = nullptr;
     QMenu *addMenu_ = nullptr;

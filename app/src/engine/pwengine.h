@@ -192,6 +192,12 @@ public:
     // core -- twice for no reason. Matters when re-asserting levels across
     // every path at once, where the doubled proxy churn is audible.
     bool setPathLevel(const std::string &handle, float volume, bool muted);
+    // Holds a path silent on top of its own mute, which is left alone and
+    // comes back when the cut is lifted. For a safety that overrides the
+    // user's settings without rewriting them: every setPathMuted() and
+    // setPathVolume() keeps landing on the stored values while the cut holds.
+    // True when it changed anything.
+    bool setPathCut(const std::string &handle, bool cut);
 
     // Volume and mute on one of our nodes, looked up by node.name.
     bool setNodeVolume(const std::string &nodeName, float volume, bool muted);

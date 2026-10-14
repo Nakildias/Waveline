@@ -504,22 +504,30 @@ private:
 };
 
 // KWin's blur behind the translucent background -- the frosted look every
-// Monarchy window has. Re-sent on every show: a new surface forgets it.
+// Monarchy window has. Re-sent on every show: a new surface forgets it. Off
+// while Blur & Transparency is, and taken back or given again the moment that
+// changes, so Gaming Mode stops KWin blurring an open mixer at once.
 class BlurAttachment : public QObject {
 public:
     explicit BlurAttachment(QWidget *window) : QObject(window), window_(window) {
         window->installEventFilter(this);
+        connect(&Settings::instance(), &Settings::changed, this, [this] {
+            if (window_->isVisible()) apply();
+        });
     }
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override {
-        if (watched == window_ && event->type() == QEvent::Show)
-            if (QWindow *h = window_->windowHandle())
-                KWindowEffects::enableBlurBehind(h, true);
+        if (watched == window_ && event->type() == QEvent::Show) apply();
         return false;
     }
 
 private:
+    void apply() {
+        if (QWindow *h = window_->windowHandle())
+            KWindowEffects::enableBlurBehind(h, Settings::instance().blurEnabled());
+    }
+
     QWidget *window_;
 };
 #endif  // WAVELINE_HAVE_KWINDOWSYSTEM

@@ -97,8 +97,13 @@ public:
 
     // The background's alpha byte for a window that paints its own, as
     // Monarchy's windows do. The light scheme is drawn a little more opaque,
-    // as it is there.
+    // as it is there. Fully opaque while Blur & Transparency is off.
     int windowAlpha(bool dark) const;
+
+    // Appearance > Blur & Transparency. Gaming Mode switches it off, and every
+    // Monarchy window goes solid at once -- the background opaque, the menus
+    // opaque, and no blur asked of KWin -- so the mixer does too.
+    bool blurEnabled() const { return blurEnabled_; }
 
     // How the desktop's menus are painted: Appearance > Shell Components, for
     // "all context menus" or, where that tier is not configured, for "all".
@@ -141,6 +146,7 @@ private:
     bool separateInactiveShadow_ = false;
     ShadowStyle inactiveShadow_;
     int opacityPercent_ = 85;
+    bool blurEnabled_ = true;
     MenuSurface menuSurface_;
     int kwinCornerRadius_ = 14;
     QString signature_;

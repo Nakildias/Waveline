@@ -106,8 +106,9 @@ of its own.
 **Added a new microphone since? Re-run the installer.** It is safe to run as
 many times as you like: it re-detects what is plugged in and installs whatever
 the new device needs. Work already done is skipped — DeepFilterNet is not
-rebuilt if it is already there — though the mixer itself is recompiled each
-time, so give it a minute.
+rebuilt if it is already there, and neither is the kernel patch when DKMS
+already has one built from the same sources for your kernel. The mixer is
+rebuilt incrementally, so only what changed is recompiled.
 
 Two things worth knowing before you bother:
 
@@ -179,6 +180,7 @@ sudo ./install.sh --help
 | `WAVELINE_NO_AUTOSTART=1` | Install, but do not enable/start `wavelined` |
 | `WAVELINE_PRO_AUDIO=1` | Superseded. Pro Audio is now the **Latency** control in the mixer — set it to “Pro Audio (85 ms)”, and set it back afterwards. Kept only so the old instruction tells you where it went |
 | `WAVELINE_SKIP_DFN=1` | Skip building DeepFilterNet; the mixer falls back to RNNoise |
+| `WAVELINE_FORCE_KERNEL=1` | Rebuild the kernel patch even when DKMS already has one built from the same sources for this kernel |
 | `WAVELINE_SKIP_FLUIDSYNTH=1` | Skip installing and staging FluidSynth; the MIDI instrument channel is then unavailable |
 | `WAVELINE_KEEP_JACK2=1` | Leave the JACK implementation alone (step 5), for a machine deliberately running a real `jackd` |
 | `WAVELINE_BUILD_IMAGE=…` | Atomic only: base image for the container build environment |
@@ -217,7 +219,9 @@ cannot end up with no USB audio driver at all.
   software captures) and a **Monitor mix** (what you hear), balanced
   independently per channel.
 - **Up to 5 Monitor mix outputs**, each with its own destination, level and
-  mute — headphones and speakers at once, at different volumes.
+  mute — headphones and speakers at once, at different volumes. Each mix is a
+  slim card at the end of the row (#1, #2, … and #SM for the Stream mix): click
+  its number to pick the device, or drag it onto another to swap the two.
 - **Multiple input devices.** Add, remove and rebuild capture devices live;
   channels follow.
 - **Per-application routing.** Move any playing application onto a channel by
@@ -229,7 +233,9 @@ cannot end up with no USB audio driver at all.
 ### Processing
 
 - **Noise suppression** — DeepFilterNet (default when available) or RNNoise,
-  switchable at runtime. On or off, always at full strength.
+  switchable at runtime in **Settings & Diagnostics ▸ General**, where it can
+  also pause itself while nothing is listening. On or off, always at full
+  strength.
 - **Per-channel and per-device effects**: low-cut filter, EQ, de-esser. The EQ
   has two modes — three tone sliders, or an Advanced panel with ten fully
   parametric bands on a draggable response curve, with presets.
@@ -376,12 +382,12 @@ Waveline treats latency as something to control and measure rather than infer.
   rtkit — which grants 25 threads per user, against the ~100 a full Waveline
   graph runs, and leaves the rest to be starved. The installer grants the
   rlimit, on every machine, exactly as the `realtime-privileges` package does.
-  **Audio diagnostics** reports how many audio threads actually got it, so this
+  **Settings & Diagnostics ▸ Diagnostics** reports how many audio threads actually got it, so this
   is something you can check rather than assume.
 - **Measured, not calculated.** Each input's delay is the median of recent
   readings of ALSA's own `delay` for that device, taken from
-  `/proc/asound`. Hover an input's number badge, or open **Audio diagnostics**
-  next to the Latency control for the whole picture — per-device delay, the
+  `/proc/asound`. Hover an input's number badge, or open **Settings &
+  Diagnostics** from the toolbar for the whole picture — per-device delay, the
   graph cycle, and which node is currently driving the graph.
 - **Devices that hide their latency.** Hardware doing its own processing (a
   conference camera, a headset with onboard AEC) decides its delay somewhere
@@ -407,7 +413,7 @@ report an error if they cannot restore the wiring.
 
 This is a recovery aid, not a guarantee of clean audio at 100% CPU or a detector
 for every USB/firmware failure. If crackling happens only under heavy load, try
-**Relaxed (21.3 ms)** latency and check real-time scheduling in Audio diagnostics.
+**Relaxed (21.3 ms)** latency and check real-time scheduling in Settings & Diagnostics.
 If distortion persists without recorded xruns, the manual rebuild remains
 available; collect a report before rebuilding to preserve the failure state.
 To disable automatic overload recovery for troubleshooting, set

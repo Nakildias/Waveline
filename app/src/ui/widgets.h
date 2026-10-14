@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include <QAbstractButton>
 #include <QAbstractSlider>
 #include <QComboBox>
@@ -22,6 +24,7 @@
 #include <QString>
 #include <QWheelEvent>
 
+class QHBoxLayout;
 class QLabel;
 class QVBoxLayout;
 
@@ -79,6 +82,16 @@ public:
     // Drawn dimmed and struck through when the mix this fader feeds is muted,
     // so a muted channel is obvious without reading the button below it.
     void setMuted(bool muted);
+    // Draws the handle and nothing else: something behind the fader -- a mix
+    // card's level meter -- is the track. See trackRect().
+    void setTrackHidden(bool hidden);
+    // Where the track runs, in the fader's own coordinates: the handle's
+    // centre travels from its top to its bottom.
+    QRectF trackRect(qreal width) const;
+    // Where the handle's centre is, and how far it travels end to end, in
+    // pixels: what something dragging the fader from outside it needs.
+    qreal handleCenter() const { return handleY(); }
+    int travel() const;
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -99,6 +112,7 @@ private:
 
     Theme::Live accent_;
     bool muted_ = false;
+    bool trackHidden_ = false;
 };
 
 // --------------------------------------------------------------- TrackSlider
@@ -112,6 +126,13 @@ public:
     explicit TrackSlider(QWidget *parent = nullptr);
 
     void setAccent(const QColor &c);
+    // The faders' look, on its side: a thick track filled to the handle in the
+    // accent, and the faders' cap for a handle -- so a row of these reads as
+    // the same control as the cards' faders.
+    void setFaderStyle(bool on);
+    // As Fader's: the handle alone, over a meter that is the track.
+    void setTrackHidden(bool hidden);
+    QRectF trackRect(qreal thickness) const;
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -127,7 +148,18 @@ private:
     void setValueFromPos(int posX);
 
     Theme::Live accent_;
+    bool faderStyle_ = false;
+    bool trackHidden_ = false;
 };
+
+// A level meter standing in for a slider's track: laid exactly under it, kept
+// there as the slider moves, resizes, shows and hides, and left to the mouse
+// to pass through. The slider stops drawing a track of its own, so the bar
+// behind the handle is the level, and the handle is where it is set. The
+// meter is a sibling of the slider, owned by its parent.
+class LevelMeter;
+LevelMeter *attachTrackMeter(Fader *fader, int thickness = 8);
+LevelMeter *attachTrackMeter(TrackSlider *slider, int thickness = 8);
 
 // --------------------------------------------------------------------- Knob
 // A rotary pro-audio control for continuous Creative FX parameters. Built on
@@ -281,6 +313,9 @@ public:
     void setFillColor(const QColor &c);
     // A 3px strip of the channel colour along the top edge.
     void setTopStripe(const QColor &c);
+    // A 1px outline all the way round, in place of the strip: the channel
+    // cards' look. An invalid colour draws none.
+    void setBorderColor(const QColor &c);
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -289,6 +324,32 @@ private:
     int radius_ = 12;
     Theme::Live fill_;
     Theme::Live stripe_;
+    Theme::Live border_;
+};
+
+// ------------------------------------------------------------------ IconTile
+// The rounded, colour-filled square holding a card's icon: an input device's,
+// a channel's, a mix's, Application Settings'. Painted rather than styled so
+// the corner radius actually clips the fill. The tile is the card's identity,
+// so it is also where that is edited -- see setOnClicked().
+class IconTile : public QWidget {
+public:
+    IconTile(const QString &iconName, const QColor &color, QWidget *parent = nullptr);
+    void setAppearance(const QString &iconName, const QColor &color);
+    // A callback rather than a signal, so the tile needs no moc pass.
+    void setOnClicked(std::function<void()> fn);
+
+protected:
+    void paintEvent(QPaintEvent *) override;
+    void enterEvent(QEnterEvent *) override;
+    void leaveEvent(QEvent *) override;
+    void mousePressEvent(QMouseEvent *e) override;
+
+private:
+    QString icon_;
+    QColor color_;
+    bool hover_ = false;
+    std::function<void()> onClick_;
 };
 
 // ------------------------------------------------------------------ Section
@@ -303,10 +364,16 @@ public:
     // The hardware panel names the microphone it belongs to, and which
     // microphone that is is only known once the device profile has been read.
     void setTitle(const QString &title);
+    // Put before the caption, on its line: the Application Settings card's
+    // tile. The section takes it over.
+    void setLeadingWidget(QWidget *widget);
+    // The caption centred across the card rather than flush left.
+    void setCaptionCentered(bool centered);
 
 private:
     QVBoxLayout *content_ = nullptr;
     QLabel *caption_ = nullptr;
+    QHBoxLayout *header_ = nullptr;
 };
 
 // -------------------------------------------------------- MonitorModeButton

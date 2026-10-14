@@ -33,6 +33,13 @@ public:
                        QWidget *parent = nullptr);
 
     QString name() const;
+
+    // For a card with no name of its own -- a mix, Application Settings --
+    // there is no name to edit, and the field goes.
+    void setNameEditable(bool editable);
+    // For a card whose glyph is fixed -- Application Settings is a gear --
+    // only the colour is offered.
+    void setIconEditable(bool editable);
     // Invalid / empty when the card should follow the theme again.
     QColor color() const { return usingDefaults_ ? QColor() : color_; }
     QString icon() const { return usingDefaults_ ? QString() : icon_; }
@@ -49,6 +56,8 @@ private:
     void useDefaults();
 
     QLineEdit *name_ = nullptr;
+    // The icon card: its grid and its Add SVG button, hidden together.
+    QList<QWidget *> iconSection_;
     QLabel *preview_ = nullptr;
     // Kept so the swatches can be redrawn with whichever icon is selected:
     // seeing the glyph on the colour is how the contrast flip shows itself
