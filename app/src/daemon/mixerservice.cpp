@@ -246,6 +246,15 @@ MixerService::MixerService(QObject *parent) : QObject(parent) {
     connect(&captureSettleTimer_, &QTimer::timeout, this,
             &MixerService::rebuildCaptureHops);
 
+    // A monitor turned off/on or unplugged/replugged leaves USB capture
+    // robotic with no trace in the graph -- see displayhotplug.h. Same
+    // recovery as the Rebuild button, once the displays have gone quiet.
+    connect(&displayHotplug_, &waveline::DisplayHotplugWatcher::settled, this, [this] {
+        if (!captureHotplugArmed_) return;  // startup does its own settle
+        if (scheduleCaptureSettle({}))
+            qInfo("waveline: display connected/disconnected -- rebuilding capture");
+    });
+
     routeRetryTimer_.setSingleShot(true);
     routeRetryTimer_.setInterval(400);
     connect(&routeRetryTimer_, &QTimer::timeout, this, [this] {
@@ -1480,8 +1489,12 @@ bool MixerService::start(QString &error) {
 
     hwTimer_.start();
     deadCardTimer_.start();
-    if (qEnvironmentVariable("WAVELINE_AUTO_CAPTURE_RECOVERY") != QLatin1String("0"))
+    if (qEnvironmentVariable("WAVELINE_AUTO_CAPTURE_RECOVERY") != QLatin1String("0")) {
         captureHealthTimer_.start();
+        if (!displayHotplug_.start())
+            qWarning("waveline: cannot watch display hotplug (%s); a monitor "
+                     "change may need a manual Rebuild", strerror(errno));
+    }
     soundboardReapTimer_.start();
     return true;
 }
@@ -1883,6 +1896,31 @@ void MixerService::checkCaptureHealth() {
     const bool recovering = captureSettleTimer_.isActive() || settlePass_ != 0;
     QStringList affected;
     QSet<QString> live;
+
+    // The graph clock moved under a running capture. Every hardware mic is
+    // exposed to this, not only the Wave:3 -- see captureclockrecovery.h.
+    QStringList clockMoved;
+    QSet<QString> clockLive;
+    for (const auto &bus : graph_->masterBuses()) {
+        if (bus.busType == "midi" || !bus.chain.selectorReady || !bus.chain.selector)
+            continue;
+        const QString id = QString::fromStdString(bus.id);
+        clockLive.insert(id);
+        const auto health = bus.chain.selector->health();
+        if (captureClock_[id].observe(now, health.instance, health.clockChanges,
+                                      health.cycles, recovering || bus.captureNode.empty())) {
+            clockMoved.append(id);
+            qInfo("waveline: graph clock changed under '%s' (now driven by node %u); "
+                  "resetting its resampler", qUtf8Printable(id), health.driverId);
+        }
+    }
+    for (auto it = captureClock_.begin(); it != captureClock_.end();) {
+        if (!clockLive.contains(it->first)) it = captureClock_.erase(it);
+        else ++it;
+    }
+    // Coalesces with the overload request below in captureRecovery_.
+    if (!clockMoved.isEmpty()) scheduleCaptureSettle(clockMoved);
+
     for (const auto &bus : graph_->masterBuses()) {
         const QString id = QString::fromStdString(bus.id);
         if (!masterHasWave3Hw(id)) continue;

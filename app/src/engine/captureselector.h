@@ -34,6 +34,10 @@ public:
 
     struct Health {
         uint64_t instance = 0, xruns = 0, cycles = 0;
+        // Cycles that arrived from a different driver, or at a different
+        // rate, than the cycle before. Quantum changes are not counted.
+        uint64_t clockChanges = 0;
+        uint32_t driverId = 0xffffffffu;  // SPA_ID_INVALID until the first cycle
     };
     Health health() const;
 
