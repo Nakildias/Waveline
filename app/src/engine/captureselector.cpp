@@ -31,6 +31,13 @@ struct CaptureSelector::Impl {
     std::atomic<uint64_t> xruns{0}, cycles{0};
     uint64_t previousXrun = 0;
     uint32_t previousDriver = SPA_ID_INVALID;
+    // Driver/rate of the previous cycle, tracked whatever is selected: a
+    // silenced selector still shares its group's clock. See
+    // daemon/captureclockrecovery.h.
+    uint32_t clockDriver = SPA_ID_INVALID;
+    uint32_t clockRate = 0;
+    std::atomic<uint64_t> clockChanges{0};
+    std::atomic<uint32_t> driverId{SPA_ID_INVALID};
 };
 
 namespace {
@@ -39,6 +46,18 @@ void onProcess(void *userdata, spa_io_position *position) {
     auto *d = static_cast<CaptureSelector::Impl *>(userdata);
     DspScope probe(d->meter, position);
     const uint32_t n = position->clock.duration;
+
+    {
+        const auto &clock = position->clock;
+        if (d->clockDriver != SPA_ID_INVALID &&
+            (clock.id != d->clockDriver || clock.rate.denom != d->clockRate)) {
+            d->clockChanges.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (clock.id != d->clockDriver)
+            d->driverId.store(clock.id, std::memory_order_relaxed);
+        d->clockDriver = clock.id;
+        d->clockRate = clock.rate.denom;
+    }
 
     const std::size_t selected = d->selected.load(std::memory_order_relaxed);
     if (selected < d->inputs.size()) {
@@ -92,7 +111,9 @@ CaptureSelector::~CaptureSelector() { stop(); }
 
 CaptureSelector::Health CaptureSelector::health() const {
     return {d_->instance, d_->xruns.load(std::memory_order_relaxed),
-            d_->cycles.load(std::memory_order_relaxed)};
+            d_->cycles.load(std::memory_order_relaxed),
+            d_->clockChanges.load(std::memory_order_relaxed),
+            d_->driverId.load(std::memory_order_relaxed)};
 }
 
 std::string CaptureSelector::inputPort(std::size_t index, int channel) {

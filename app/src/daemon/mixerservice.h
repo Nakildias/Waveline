@@ -14,6 +14,8 @@
 #pragma once
 
 #include "capturerecoveryqueue.h"
+#include "captureclockrecovery.h"
+#include "displayhotplug.h"
 #include "captureoverloadrecovery.h"
 
 #include <QDBusContext>
@@ -1233,6 +1235,9 @@ private:
     QTimer captureSettleTimer_;
     QTimer captureHealthTimer_;
     std::map<QString, waveline::CaptureOverloadRecovery> captureHealth_;
+    std::map<QString, waveline::CaptureClockRecovery> captureClock_;
+    // 4 s of display quiet, then the normal settled capture recovery.
+    waveline::DisplayHotplugWatcher displayHotplug_{4000};
     void checkCaptureHealth();
     waveline::CaptureRecoveryQueue captureRecovery_;
     QSet<QString> captureHealOnAppear_;

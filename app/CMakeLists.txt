@@ -136,6 +136,9 @@ qt_add_executable(wavelined
     # Device names a desktop shell renamed, when one has -- optional, one-way,
     # and absent on a machine with no such shell. See desktopnames.h.
     src/daemon/desktopnames.cpp
+    # Display hotplug -> microphone recovery. See displayhotplug.h.
+    src/daemon/displayhotplug.cpp
+    src/daemon/displayhotplug.h
     src/daemon/configstore.h
     src/daemon/mixerservice.h
     src/daemon/alsaaliases.h
