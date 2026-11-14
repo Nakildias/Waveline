@@ -279,9 +279,10 @@ QWidget *SettingsWindow::buildLatencyTab() {
         page));
 
     latencyCombo_ = new QComboBox(page);
-    // userData is the quantum in frames; 0 means "leave it alone", the only
-    // entry that does not take a global setting away from someone who set it
-    // themselves.
+    // userData is the quantum in frames; 0 means "leave it alone" (negotiated),
+    // which is what a DAW needs. The default is Balanced (512): a negotiated
+    // quantum moves whenever an app asks for less latency -- Discord does on
+    // every call join -- and that move can leave a USB mic sounding robotic.
     latencyCombo_->addItem(tr("Automatic"), 0);
     latencyCombo_->addItem(tr("Insane (0.7 ms)"), 32);
     latencyCombo_->addItem(tr("Extreme (1.3 ms)"), 64);
@@ -618,8 +619,8 @@ void SettingsWindow::syncLatencyCombo() {
 
     syncing_ = true;
     // "Automatic" is a real state, not an absence of one, so it says what it
-    // resolved to. Without this the entry a fresh install lands on is the only
-    // one that does not tell you your latency.
+    // resolved to. Without this it would be the only entry that does not tell
+    // you your latency.
     latencyCombo_->setItemText(
         0, effective > 0 ? tr("Automatic (%1)").arg(framesLabel(effective))
                          : tr("Automatic"));

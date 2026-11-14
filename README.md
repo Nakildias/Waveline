@@ -357,8 +357,8 @@ Waveline treats latency as something to control and measure rather than infer.
   it is unplugged. Waveline lowers `priority.driver` on every capture node so
   outputs always outrank inputs, and pins the graph to 48 kHz so it cannot be
   dragged onto a device's own rate.
-- **A Latency control**, in the header: Automatic, or a fixed graph cycle from
-  0.7 ms to 85 ms. It writes
+- **A Latency control**, in the header: a fixed graph cycle from 0.7 ms to
+  85 ms, Balanced (10.7 ms) by default, or Automatic. It writes
   PipeWire's `clock.force-quantum`, so it applies to the running graph
   instantly — no restart and no reinstall. This is where Pro Audio support
   lives now. Changing it briefly reopens each input's capture hop, which is
@@ -373,7 +373,12 @@ Waveline treats latency as something to control and measure rather than infer.
   the result is crackling that looks like it comes from the DAW. Automatic is
   the one setting that leaves the graph free to negotiate, which hands that
   choice back. This is the other half of step 5 above; the two are always hit
-  together.
+  together. Automatic is not the default because a negotiated graph moves
+  whenever any app asks for less latency. Discord does that every time you
+  join a voice call, dropping the graph from 512 to 256 frames under an open
+  microphone, which can leave a USB mic sounding robotic until it is rebuilt.
+  A pinned quantum cannot be moved that way. Configs saved while Automatic was
+  the default are moved to Balanced once; choosing Automatic again sticks.
 - **Real-time scheduling, for all of it.** A small graph cycle is only worth
   asking for if the threads can meet it. At 10.7 ms an ordinary thread makes its
   deadline even on a loaded machine; at 2.7 ms it does not, and the difference

@@ -41,17 +41,27 @@ def next_quirk_bit(header):
     Not a constant, because upstream keeps appending to that enum: 7.2 added
     QUIRK_TYPE_MIXER_GET_CUR_BROKEN, which took bit 30 and broke a patch that
     had hard-coded it. Reading the enum means a new neighbour costs nothing.
+
+    The ceiling is read from the header too. Up to 7.2 chip->quirk_flags is an
+    unsigned int and QUIRK_FLAG() uses BIT_U32; 7.3 widened both to 64 bits
+    (u64, BIT_U64) and immediately used bit 32. Assuming 32 bits made the
+    patch refuse to apply on exactly the kernel that had made room for it.
     """
+    text = header.read_text()
     bits = [int(b) for b in
-            re.findall(r"^\tQUIRK_TYPE_[A-Z0-9_]+\t+= (\d+),$",
-                       header.read_text(), re.M)]
+            re.findall(r"^\tQUIRK_TYPE_[A-Z0-9_]+\t+= (\d+),$", text, re.M)]
     if not bits:
         sys.exit("waveline/wave3: usbaudio.h: no QUIRK_TYPE_* enum found")
+    if re.search(r"\b(u64|BIT_U64|BIT_ULL)\b.*\bquirk_flags\b|"
+                 r"#define QUIRK_FLAG\(x\)\s+BIT_(U64|ULL)\(", text):
+        width = 64
+    else:
+        width = 32
     bit = max(bits) + 1
-    if bit > 31:
-        sys.exit("waveline/wave3: usbaudio.h: quirk_flags is a u32 and every "
-                 f"bit is taken (highest is {max(bits)}); this patch needs an "
-                 "upstream widening before it can be applied")
+    if bit > width - 1:
+        sys.exit(f"waveline/wave3: usbaudio.h: quirk_flags is {width} bits and "
+                 f"every bit is taken (highest is {max(bits)}); this patch "
+                 "needs an upstream widening before it can be applied")
     return bit
 
 
@@ -69,12 +79,14 @@ def main():
     # behind a named neighbour. The enum is a list upstream adds to, and the
     # bit number and the name-table index below have to agree -- appending to
     # the end of both is the only arrangement that stays true across kernels.
+    #
+    # The closing reminder comment is matched by its start only: 7.3 extended
+    # it to "... snd_usb_audio_quirk_flag_names and alsa-configuration.rst */".
     bit = next_quirk_bit(src / "usbaudio.h")
-    edit(src / "usbaudio.h",
-         "/* Please also edit snd_usb_audio_quirk_flag_names */",
-         f"	QUIRK_TYPE_UAC1_SHARED_CLOCK		= {bit},\n"
-         "/* Please also edit snd_usb_audio_quirk_flag_names */",
-         "QUIRK_TYPE_UAC1_SHARED_CLOCK enum entry")
+    edit_re(src / "usbaudio.h",
+            r"(?m)^(/\* Please also edit snd_usb_audio_quirk_flag_names\b[^\n]*\*/)$",
+            f"\tQUIRK_TYPE_UAC1_SHARED_CLOCK\t\t= {bit},\n\\1",
+            "QUIRK_TYPE_UAC1_SHARED_CLOCK enum entry")
 
     edit(src / "usbaudio.h",
          "#define QUIRK_FLAG_IFB_SILENCE_ON_EMPTY		QUIRK_FLAG(IFB_SILENCE_ON_EMPTY)",

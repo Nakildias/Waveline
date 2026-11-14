@@ -375,12 +375,24 @@ struct Profile {
 struct AudioSettings {
     // Frames per graph cycle, written to PipeWire's clock.force-quantum.
     //
-    // 0 means "leave it alone", and is the default on purpose: it is the only
-    // value that does not take a global setting away from a user who set it
-    // themselves. With 0 the graph runs on whatever the config files say --
-    // 512 once 50-waveline-clock.conf is installed -- and Waveline reports
-    // that number rather than imposing one.
-    int graphQuantum = 0;
+    // 0 means "leave it alone" (Automatic): the graph negotiates, and any
+    // application's node.latency can move it. That is what a DAW needs, and it
+    // is still offered, but it is not the default. A negotiated quantum moves
+    // underneath an open capture whenever an app asks for less latency --
+    // Discord's voice engine asks for 360/48000 the moment you join a call,
+    // which drops the graph from 512 to 256 -- and that transition is the one
+    // that leaves a USB microphone's resampler in a robotic resync loop (see
+    // SetGraphQuantum). node.lock-quantum on the capture profiles does not
+    // reliably stop it. A pin does: node.latency cannot move a forced quantum.
+    //
+    // So the default is 512 (10.7 ms), the same value 50-waveline-clock.conf
+    // ships, pinned rather than merely configured.
+    int graphQuantum = 512;
+    // Set once a config has been through the Automatic -> 512 default change.
+    // Configs written before it saved 0 because 0 *was* the default, not
+    // because anyone picked it; they are moved to 512 once, and a user who
+    // chooses Automatic afterwards keeps it.
+    bool graphQuantumMigrated = true;
     // Frames of api.alsa.headroom for non-USB output devices, 0 for "do not
     // write a rule at all".
     //

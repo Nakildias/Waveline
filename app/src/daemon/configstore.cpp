@@ -920,14 +920,21 @@ bool ConfigStore::load() {
     if (companion_.port < 1024 || companion_.port > 65535) companion_.port = 8787;
 
     const QJsonObject audio = root[QStringLiteral("audio")].toObject();
-    audio_.graphQuantum = audio[QStringLiteral("graphQuantum")].toInt(0);
+    audio_.graphQuantum = audio[QStringLiteral("graphQuantum")].toInt(512);
     // Anything outside PipeWire's own bounds is not a quantum, it is a typo or
-    // a config from a future version. Falling back to 0 ("leave it alone")
-    // rather than clamping: a value we do not understand is not a preference we
-    // should act on a nearby approximation of.
+    // a config from a future version. Falling back to the default rather than
+    // clamping: a value we do not understand is not a preference we should act
+    // on a nearby approximation of.
     if (audio_.graphQuantum != 0 &&
         (audio_.graphQuantum < 32 || audio_.graphQuantum > 8192))
-        audio_.graphQuantum = 0;
+        audio_.graphQuantum = 512;
+    // Automatic used to be the default, so a saved 0 from before the change
+    // records the old default, not a choice. Move it to 512 once; the marker
+    // is written back on save, so picking Automatic later sticks.
+    if (!audio[QStringLiteral("graphQuantumMigrated")].toBool(false) &&
+        audio_.graphQuantum == 0)
+        audio_.graphQuantum = 512;
+    audio_.graphQuantumMigrated = true;
 
     audio_.outputHeadroom = audio[QStringLiteral("outputHeadroom")].toInt(512);
     // Same reasoning as the quantum: an unreadable value means no rule rather
@@ -1020,6 +1027,7 @@ bool ConfigStore::save() const {
 
     QJsonObject audio;
     audio[QStringLiteral("graphQuantum")] = audio_.graphQuantum;
+    audio[QStringLiteral("graphQuantumMigrated")] = audio_.graphQuantumMigrated;
     audio[QStringLiteral("outputHeadroom")] = audio_.outputHeadroom;
     audio[QStringLiteral("realtime")] = audio_.realtime;
     audio[QStringLiteral("autoPauseNoiseSuppression")] = audio_.autoPauseNoiseSuppression;
