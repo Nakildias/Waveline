@@ -97,6 +97,22 @@ NEED_REBOOT=0
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
 warn() { printf '    \033[33mwarn\033[0m %s\n' "$*"; }
+
+# Parallel compile jobs: one per core, capped so each job gets ~1.5 GB of
+# available memory -- a Qt translation unit at -O3 peaks near that, and a
+# handheld that swaps is slower than one that builds with fewer jobs.
+build_jobs() {
+	local cpus mem_kb by_mem
+	cpus="$(nproc 2>/dev/null || echo 1)"
+	mem_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+	if [[ -n "$mem_kb" ]]; then
+		by_mem=$(( mem_kb / 1572864 ))
+		(( by_mem < 1 )) && by_mem=1
+		(( by_mem < cpus )) && cpus=$by_mem
+	fi
+	echo "$cpus"
+}
+BUILD_JOBS="$(build_jobs)"
 die()  { printf '\n\033[31mxx   %s\033[0m\n' "$*" >&2; exit 1; }
 
 # The packages in "$@" that are not installed yet, one per line. `pacman -S
@@ -367,7 +383,7 @@ build_mixer_app_only() {
 			return 1
 		fi
 	fi
-	if buildenv_run "$ROOT" cmake --build "$ROOT/app/build" --target waveline-mixer \
+	if buildenv_run "$ROOT" cmake --build "$ROOT/app/build" --parallel "$BUILD_JOBS" --target waveline-mixer \
 	     >>/tmp/waveline-mixer-build.log 2>&1; then
 		ok "waveline-mixer built"
 	else
@@ -1070,7 +1086,7 @@ kernel_patch_atomic() {
 		echo "using $kb"
 		llvm=
 		grep -qs "^CONFIG_CC_IS_CLANG=y" "$kb/.config" "$kb/include/config/auto.conf" && llvm=LLVM=1
-		exec make -C "$kb" M='"$ROOT"'/src $llvm modules' >/tmp/waveline-build.log 2>&1; then
+		exec make -j'"$BUILD_JOBS"' -C "$kb" M='"$ROOT"'/src $llvm modules' >/tmp/waveline-build.log 2>&1; then
 		warn "build failed -- see /tmp/waveline-build.log"
 		warn "  either the patch anchors do not match kernel $KREL, or the build"
 		warn "  environment has no headers for it. On an image-based system the"
@@ -1159,7 +1175,7 @@ else
 	elif WAVELINE_PROFILES="$DETECTED" WAVELINE_CACHE=/var/cache/waveline \
 	     bash "$ROOT/scripts/prepare-src.sh" >/tmp/waveline-prepare.log 2>&1; then
 		ok "kernel sources staged and patched"
-		KMAKE=(make -C "$KB" M="$ROOT/src")
+		KMAKE=(make -j"$BUILD_JOBS" -C "$KB" M="$ROOT/src")
 		kbuild_is_clang "$KB" && KMAKE+=(LLVM=1)
 		if "${KMAKE[@]}" modules >/tmp/waveline-build.log 2>&1; then
 			ok "module built"
@@ -1796,7 +1812,7 @@ if [[ $MIXER_DEPS_OK -eq 1 ]]; then
 	# root-owned object files would be a nuisance to clean up afterwards.
 	if buildenv_run "$ROOT" cmake -S "$ROOT/app" -B "$ROOT/app/build" \
 	     -DCMAKE_BUILD_TYPE=Release >/tmp/waveline-mixer-build.log 2>&1 &&
-	   buildenv_run "$ROOT" cmake --build "$ROOT/app/build" \
+	   buildenv_run "$ROOT" cmake --build "$ROOT/app/build" --parallel "$BUILD_JOBS" \
 	     >>/tmp/waveline-mixer-build.log 2>&1 &&
 	   stage_runtime_libs "$ROOT/app/build/wavelined" "$ROOT/app/build/waveline-mixer"; then
 		ok "mixer built"
