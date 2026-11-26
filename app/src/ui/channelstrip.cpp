@@ -30,6 +30,13 @@
 #include "levelmeter.h"
 #include "theme.h"
 
+
+// One wording for every button that drives the microphone's Waveline mute, so
+// they cannot drift apart again. tr() through QObject, as there is no instance.
+static QString micMuteTip() {
+    return QObject::tr("Mute this microphone in Waveline. Its processed source "
+                       "goes silent; the microphone itself stays live.");
+}
 namespace {
 
 constexpr int kCardWidth = 122;
@@ -194,6 +201,28 @@ ChannelStrip::ChannelStrip(const QString &id, const QString &name, QWidget *pare
     title->setToolTip(name);
     nameRow_->addWidget(title, 1);
     lay->addLayout(nameRow_);
+
+    // Shown under the name while the microphone is muted in Waveline. The
+    // highlighted mute button alone was easy to miss, and this mute leaves the
+    // device itself live -- anything recording it directly still hears it --
+    // so a silent processed source looked like a fault (issue #20).
+    mutedBadge_ = new QLabel(tr("MUTED"), this);
+    QFont mf = mutedBadge_->font();
+    mf.setPointSizeF(mf.pointSizeF() * 0.78);
+    mf.setBold(true);
+    mutedBadge_->setFont(mf);
+    mutedBadge_->setToolTip(
+        tr("This microphone is muted in Waveline, so its processed source is "
+           "silent. The microphone itself is still live. Click the mute button "
+           "to unmute."));
+    Theme::follow(mutedBadge_, [b = mutedBadge_] {
+        b->setStyleSheet(
+            QStringLiteral("color: %1; background: %2; border-radius: 6px; "
+                           "padding: 2px 7px;")
+                .arg(Theme::Danger.name(), Theme::DangerGround.name()));
+    });
+    mutedBadge_->setVisible(false);
+    lay->addWidget(mutedBadge_, 0, Qt::AlignHCenter);
 
     // ------------------------------------------------------------- faders
     cols_ = new QHBoxLayout;
@@ -668,7 +697,7 @@ void ChannelStrip::enableGainFader(bool on) {
         // Detach the generic handler: it would emit muteToggled("gain"), which
         // the daemon parses as the Stream mix.
         disconnect(gain_.mute, nullptr, this, nullptr);
-        gain_.mute->setToolTip(tr("Mute the microphone."));
+        gain_.mute->setToolTip(micMuteTip());
         connect(gain_.mute, &QAbstractButton::toggled, this,
                 [this](bool muted) { emit hardwareMuteToggled(muted); });
         connect(gain_.fader, &QSlider::valueChanged, this, [this](int v) {
@@ -929,8 +958,7 @@ void ChannelStrip::enableHardwareMute(bool on) {
                                  QStringLiteral("microphone"), this);
         hwMute_->setAccent(Theme::Danger);
         hwMute_->setIconSize(17);
-        hwMute_->setToolTip(tr("Hardware microphone mute (the pad or button on "
-                               "the microphone itself)."));
+        hwMute_->setToolTip(micMuteTip());
         connect(hwMute_, &QAbstractButton::toggled, this,
                 &ChannelStrip::hardwareMuteToggled);
         auto *head = layout()->itemAt(0)->layout();
@@ -948,21 +976,23 @@ void ChannelStrip::setGainStyle(GainStyle style) {
     // percentage back and forth.
     if (style == GainStyle::PreampDb) {
         gain_.fader->setRange(0, 80);
-        gain_.mute->setToolTip(tr("Mute the microphone."));
+        gain_.mute->setToolTip(micMuteTip());
     } else {
         gain_.fader->setRange(0, 100);
-        gain_.mute->setToolTip(
-            tr("Mute the microphone.\nThis is the input device's own mute, so "
-               "nothing recording from it hears you -- not just this mixer."));
+        // Not the device's own mute, whatever this used to say: it zeroes our
+        // gain stage, and anything recording the device directly still hears
+        // it. Claiming otherwise is how a muted strip passed for a broken one
+        // (issue #20).
+        gain_.mute->setToolTip(micMuteTip());
     }
     if (gain_.fader->parentWidget())
         gain_.fader->parentWidget()->setToolTip(
             style == GainStyle::PreampDb
                 ? tr("Hardware microphone gain (0-40 dB). Distinct from the "
                      "Stream and Monitor mix levels.")
-                : tr("Input level of the microphone itself, the same control "
-                     "your volume settings show.\nDistinct from the Stream and "
-                     "Monitor mix levels, which only change this mixer."));
+                : tr("Input level into Waveline's processing. It does not "
+                     "change the microphone's own volume.\nDistinct from the "
+                     "Stream and Monitor mix levels."));
 }
 
 void ChannelStrip::setGainValue(double value) {
@@ -997,6 +1027,7 @@ void ChannelStrip::setHardwareMuted(bool muted) {
         gain_.mute->setChecked(muted);
         if (gain_.fader) gain_.fader->setMuted(muted);
     }
+    if (mutedBadge_) mutedBadge_->setVisible(muted);
 }
 
 QWidget *ChannelStrip::buildColumn(const QString &mix, const QString &iconOn,

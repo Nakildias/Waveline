@@ -1034,6 +1034,21 @@ void MixerService::applyMasterInputVolume(const QString &masterId) {
     graph_->setMasterInputGain(masterId.toStdString(),
                                m->micInputMuted ? 0.0f
                                                 : static_cast<float>(m->micInputVolume));
+
+    // Say so when the mute changes, and once per daemon start while it stays
+    // on. This mute zeroes our gain stage only: the device itself stays live,
+    // so raw capture works while the processed source is silent, and from the
+    // outside that looks exactly like a broken chain (issue #20). The set keeps
+    // graph rebuilds, which re-apply this, from repeating the warning.
+    const QString label = m->name.isEmpty() ? masterId : m->name;
+    if (m->micInputMuted && !mutedInputsWarned_.contains(masterId)) {
+        mutedInputsWarned_.insert(masterId);
+        qWarning("waveline: input '%s' is muted in Waveline -- its processed "
+                 "source is silent (the microphone itself is still live)",
+                 qUtf8Printable(label));
+    } else if (!m->micInputMuted && mutedInputsWarned_.remove(masterId)) {
+        qInfo("waveline: input '%s' unmuted", qUtf8Printable(label));
+    }
 }
 
 void MixerService::applyMasterMixLevels(const QString &masterId) {
@@ -4913,6 +4928,16 @@ QStringList MixerService::GraphDiagnostics() const {
                             const QString &d = {}) {
         out << QStringLiteral("%1\t%2\t%3").arg(k, v, d);
     };
+
+    // First, and ahead of the clock check that can return early: a muted input
+    // is the one thing in this table that makes a source silent on purpose,
+    // and it should not be found by elimination.
+    for (const MasterBusState &m : config_.live().masterBuses) {
+        if (m.busType == QLatin1String("midi") || !m.micInputMuted) continue;
+        row(tr("Input muted"), m.name.isEmpty() ? m.id : m.name,
+            tr("Muted in Waveline, so its processed source is silent. The "
+               "microphone itself is still live; unmute it on its strip."));
+    }
 
     const auto clock = engine_.graphClock();
     if (!clock.known) {

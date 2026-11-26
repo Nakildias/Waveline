@@ -1227,6 +1227,9 @@ private:
     // Nodes already dealt with by that sweep, so it acts once per unplug
     // rather than every tick. Keyed by node id: a replug is a new id.
     QSet<uint32_t> deadCardNodes_;
+    // Inputs whose Waveline mute has already been logged, so a graph rebuild
+    // re-applying it does not repeat the warning. See applyMasterInputVolume().
+    QSet<QString> mutedInputsWarned_;
     QTimer saveTimer_;
     QTimer rewireTimer_;
     QTimer monitorLevelTimer_;

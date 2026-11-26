@@ -286,6 +286,8 @@ private:
     IconToggle *settingsButton_ = nullptr;
     IconToggle *micMonitorButton_ = nullptr;
     IconToggle *hwMute_ = nullptr;
+    // "MUTED" under the name while setHardwareMuted(true); see the constructor.
+    QLabel *mutedBadge_ = nullptr;
     // Drag state for moving the card; see enableDragHandle().
     bool dragHandle_ = false;
     bool dragArmed_ = false;
